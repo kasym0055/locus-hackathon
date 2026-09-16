@@ -177,7 +177,7 @@ describe("publisher-first discovery", () => {
       ]),
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
-    expect(searches).toEqual(["images"]);
+    expect(searches).toEqual(["images", "web"]);
     expect(fetches).toBe(4);
     expect(candidate).toMatchObject({ imageUrl: original, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Fixture Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
@@ -192,6 +192,7 @@ describe("publisher-first discovery", () => {
     const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "cache_permitted" as const,
       display: "direct_permitted" as const, basis: ["Documented Wikimedia reuse and direct-display terms"] });
     const unrelatedOriginal = "https://upload.wikimedia.org/wikipedia/commons/a/aa/Example_University_Astana.jpg";
+    const labOriginal = "https://upload.wikimedia.org/wikipedia/commons/a/ac/Example_University_lab.jpg";
     const targetOriginal = "https://upload.wikimedia.org/wikipedia/commons/a/ab/Example_University_atrium.jpg";
     const filePage = (original: string, description: string, author: string) => `<h1>File page</h1>
       <div class="fullMedia"><a class="internal" href="${original}">Original file</a></div>
@@ -200,6 +201,7 @@ describe("publisher-first discovery", () => {
       <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`;
     const category = "https://commons.wikimedia.org/wiki/Category:Example_University";
     const event = "https://commons.wikimedia.org/wiki/File:Example_University_Astana.jpg";
+    const lab = "https://commons.wikimedia.org/wiki/File:Example_University.jpg";
     const target = "https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg";
     const corroboration = "https://example.edu/news/atrium";
     const about = "https://example.edu/about";
@@ -209,11 +211,13 @@ describe("publisher-first discovery", () => {
       [about, "<main>General university information.</main>"],
       [corroboration, '<figure><img src="/news.jpg"><figcaption>Our beautiful main atrium welcomes campus visitors.</figcaption></figure>'],
       [category, `<div class="gallery"><a href="/wiki/File:Example_University_Astana.jpg">University</a>
+        <a href="/wiki/File:Example_University.jpg">Laboratory</a>
         <a href="/wiki/File:Example_University_atrium.jpg">Atrium</a></div>`],
       [event, filePage(unrelatedOriginal, "Example University ceremony. Example City, KZ", "Event Photographer")],
+      [lab, filePage(labOriginal, "Example University laboratory. Example City, KZ", "Lab Photographer")],
       [target, filePage(targetOriginal, "Example University, main atrium. Example City, KZ", "Campus Photographer")],
     ]);
-    const searches: string[] = []; const fetched: string[] = []; let sharedFetches = 2;
+    const searches: string[] = []; const fetched: string[] = []; let sharedFetches = 3;
     const discover = createDiscoveryPlanner({
       fetchPage: async (url) => { if (++sharedFetches > 8) throw { code: "budget_exhausted" }; fetched.push(url);
         return { ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }; },
@@ -227,7 +231,7 @@ describe("publisher-first discovery", () => {
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
     expect(searches).toEqual(['web:site:example.edu "atrium" Example University']);
-    expect(fetched).toEqual(["https://example.edu/", category, event, target, corroboration]);
+    expect(fetched).toEqual([category, event, lab, target, corroboration]);
     expect(candidate).toMatchObject({ imageUrl: targetOriginal, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Campus Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",

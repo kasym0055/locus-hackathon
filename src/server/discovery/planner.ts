@@ -127,13 +127,13 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         }
       }
     };
-    for (const domain of university.officialDomains.slice(0, 2)) {
-      const candidates = await inspect(`https://${domain}/`, publisherIdentityPolicy);
-      const admitted = eligible(candidates, true);
-      if (admitted.length) return admitted;
-    }
     const terms = gaps.slice(0, 3).map((category) => category.replaceAll("_", " ")).join(" ");
     if (!licensedPublisherReady) {
+      for (const domain of university.officialDomains.slice(0, 2)) {
+        const candidates = await inspect(`https://${domain}/`, publisherIdentityPolicy);
+        const admitted = eligible(candidates, true);
+        if (admitted.length) return admitted;
+      }
       for (const url of navigation.slice(0, 1)) {
         const candidates = await inspect(url, publisherIdentityPolicy);
         const admitted = eligible(candidates, true);
@@ -169,7 +169,11 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const results = await search({ query: `${university.name} ${university.city} ${terms}`, kind: "images" }, ctx);
     for (const result of results.slice(0, 4)) {
       const candidates = await inspect(result.pageUrl, result.policy, result.imageUrl);
-      const admitted = eligible(candidates);
+      let admitted = eligible(candidates);
+      if (!admitted.length) {
+        await findOfficialCorroboration(candidates);
+        admitted = eligible(candidates);
+      }
       if (admitted.length) return admitted;
     }
     if (lastFailure) throw lastFailure;
