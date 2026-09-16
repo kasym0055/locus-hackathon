@@ -15,7 +15,7 @@ export async function profileFixture(options: { conflict?: boolean; permit?: boo
   const ledger: Ledger = { admit: async ctx => { admitted++; contexts.push(ctx); return { allowed: !options.busy, retryAfterSeconds: options.busy ? 2 : 0 }; },
     release: async () => { released++; }, check: async () => {}, renew: async () => {}, reserve: async () => "synthetic-reservation", settle: async () => {} };
   const raster = await sharp({ create: { width: 640, height: 480, channels: 3, background: "#83977a" } }).png().toBuffer();
-  const caption = options.caption ?? `${options.conflict ? "Partner University, Other City" : `${universityName}, Example City`} campus courtyard. Photo: Synthetic Author.`;
+  const caption = options.caption ?? `${options.conflict ? "Partner University, Other City" : `${universityName}, Example City`} campus courtyard.`;
   const html = `<html><title>${universityName}</title><body><h1>${universityName}</h1><address>Example City, Example Country <a href="mailto:info@example.edu">Contact</a></address><figure><img src="${options.crossOrigin ? "https://third-party.example/campus.png" : "/campus.png"}"><figcaption>${caption}</figcaption></figure></body></html>`;
   const transport = await transportFixture((request, response) => {
     if (request.url === "/robots.txt") { response.writeHead(404); response.end(); }

@@ -9,15 +9,13 @@ const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function support(evidence: Evidence, university: University, assessment: Assessment): Evidence {
   // Only the image-bound caption, never unrelated article text, establishes location.
   const caption = normalized(evidence.excerpt.split("\n\n")[0]);
-  // A separately delimited credit is not part of the campus attribution.
-  const attribution = caption.replace(/\. photo: [\p{L}\p{N} .,'’()-]{1,160}$/u, "");
   const locations = [...new Set([university.city, university.campus].map(normalized))];
   // Match the complete noun phrase. Unsupported continuations cannot turn an
   // institution-affiliated subject into evidence of depicted-campus ownership.
   const attributed = [university.name, ...university.aliases].map(normalized)
     .filter(value => value.length >= 3 && value.length <= 200).slice(0, 10).some(value => {
       const owner = escaped(value), place = locations.map(escaped).join("|");
-      const match = new RegExp(`^(?:the )?(?:${owner}(?:['’]s)?(?:,?\\s+(${place}))?\\s+(?:campus|кампус)(?: courtyard)?|(?:campus|кампус)(?: courtyard)? (?:of|at) ${owner})(?: (?:in|at) (${place}))?\\.?$`, "u").exec(attribution);
+      const match = new RegExp(`^(?:the )?(?:${owner}(?:['’]s)?(?:,?\\s+(${place}))?\\s+(?:campus|кампус)(?: courtyard)?|(?:campus|кампус)(?: courtyard)? (?:of|at) ${owner})(?: (?:in|at) (${place}))?\\.?$`, "u").exec(caption);
       return !!match && locations.every(location => location && [match[1], match[2]].includes(location));
     });
   const category = assessment.category === "campus" && /\b(campus|courtyard)\b|кампус/iu.test(caption);

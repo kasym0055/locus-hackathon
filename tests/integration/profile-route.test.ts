@@ -185,3 +185,9 @@ it("admits an ordered redirect chain ending at the inspected final URL", async (
   const seen = await events(await handler(request()));
   expect(seen.find(event => event.type === "image")).toMatchObject({ data: { card: { score: 80, displayUrl: "https://example.edu/final.png" } } });
 });
+it("does not discard contradictory prose following a photo credit", async () => {
+  const { handler, request } = await scenario({ caption: "Example University campus in Example City. Photo: Synthetic Author. This is actually Rival University campus." });
+  const seen = await events(await handler(request()));
+  expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+  expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
+});
