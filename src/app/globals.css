@@ -1,0 +1,7 @@
+:root { color-scheme: light; font-family: Arial, sans-serif; }
+body { margin: 0; min-height: 100vh; background: #f6f7fb; color: #162033; }
+main { margin: 0 auto; max-width: 44rem; padding: 8rem 1.5rem; }
+h1 { font-size: clamp(2.5rem, 8vw, 5rem); line-height: .95; margin: 1rem 0 2rem; }
+form { display: grid; gap: .75rem; }
+input, button { border: 1px solid #c4cbda; border-radius: .5rem; font: inherit; padding: .85rem 1rem; }
+button { background: #162033; color: white; cursor: pointer; }

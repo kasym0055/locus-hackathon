@@ -1,2 +1,11 @@
 .worktrees/
 .superpowers/
+.env*
+!.env.example
+.next/
+node_modules/
+.vercel/
+coverage/
+test-reports/
+tmp-live-artifacts/
+*.tsbuildinfo
