@@ -105,3 +105,15 @@ export interface AiAdapter {
   assess(input: AssessmentInput, ctx: RunContext): Promise<AssessmentResult>;
   describe(input: unknown, ctx: RunContext): Promise<{ ok: false; code: FailureCode }>;
 }
+export interface ImageCardData {
+  id: string; revision: number; category: Category; tags: Category[];
+  status: "verified" | "uncertain"; score: number; components: Decision["components"];
+  reasons: string[]; source: SourceRef; displayUrl?: string;
+  delivery: "remote" | "missing" | "not_permitted";
+}
+export interface Claim { text: string; evidenceIds: string[]; campusFact: boolean }
+export interface Profile {
+  university: University; cards: ImageCardData[]; description: Claim[]; sources: SourceRef[];
+  gaps: Partial<Record<Category, string>>; state: "complete" | "partial" | "insufficient_evidence" | "unavailable";
+  verifiedBaseCategories: number; warnings: FailureCode[]; provenance: "live" | "eligible_cache"; elapsedMs: number;
+}

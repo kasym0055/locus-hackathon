@@ -1,7 +1,21 @@
 :root { color-scheme: light; font-family: Arial, sans-serif; }
 body { margin: 0; min-height: 100vh; background: #f6f7fb; color: #162033; }
-main { margin: 0 auto; max-width: 44rem; padding: 8rem 1.5rem; }
-h1 { font-size: clamp(2.5rem, 8vw, 5rem); line-height: .95; margin: 1rem 0 2rem; }
+main { margin: 0 auto; max-width: 48rem; padding: 5rem 1.5rem; }
+h1 { font-size: clamp(2.5rem, 8vw, 4.5rem); line-height: 1.02; margin: 1rem 0 1.5rem; max-width: 42rem; }
+h2 { font-size: 1.8rem; margin-top: 0; }
+p { line-height: 1.55; }
+.eyebrow { text-transform: uppercase; font-size: .8rem; letter-spacing: .13em; }
+.intro { max-width: 36rem; margin-bottom: 2rem; color: #475467; }
 form { display: grid; gap: .75rem; }
-input, button { border: 1px solid #c4cbda; border-radius: .5rem; font: inherit; padding: .85rem 1rem; }
+input, button { border: 1px solid #a6b0c4; border-radius: .5rem; font: inherit; padding: .85rem 1rem; }
+input { min-width: 0; }
 button { background: #162033; color: white; cursor: pointer; }
+button.secondary { background: white; color: #162033; }
+.actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+a { color: #1459a5; text-underline-offset: .2em; }
+:focus-visible { outline: 3px solid #2481d0; outline-offset: 3px; }
+section { margin-top: 2rem; padding: 1.5rem; background: white; border: 1px solid #dce1eb; border-radius: .75rem; }
+figure { margin: 1rem 0; }
+figure img { display: block; width: 100%; height: auto; max-height: 32rem; object-fit: contain; background: #e9edf2; border-radius: .5rem; }
+figcaption { margin-top: .7rem; line-height: 1.6; font-size: .9rem; }
+@media (max-width: 480px) { main { padding-top: 2.5rem; } section { padding: 1rem; } }

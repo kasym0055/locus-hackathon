@@ -6,7 +6,7 @@ import { searchBrave, type Search } from "./brave";
 import { assertActive, httpUrl } from "./http";
 import { publisherIdentityPolicy, type PageFetcher } from "./resolver";
 
-export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; search?: Search } = {}) {
+export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; search?: Search; publisherPolicies?: ReadonlyMap<string, UsagePolicy> } = {}) {
   const fetchPage = dependencies.fetchPage ?? ((url, ctx) => safeFetch(url, "html", ctx));
   const search = dependencies.search ?? searchBrave;
   return async (university: University, gaps: Category[], ctx: RunContext): Promise<Candidate[]> => {
@@ -34,7 +34,11 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
             } catch { /* invalid publisher navigation is not a candidate */ }
           }
         }
-        return extractCandidates(page, university, policy).filter((candidate) =>
+        const grant = dependencies.publisherPolicies?.get(new URL(page.finalUrl).origin);
+        // Identity policy is not an image license. A documented direct-discovery
+        // grant can supply one; search-derived restrictions still remain binding.
+        const inherited = policy === publisherIdentityPolicy && grant ? grant : policy;
+        return extractCandidates(page, university, inherited, grant).filter((candidate) =>
           (!expectedImage || candidate.imageUrl === expectedImage) && !/\.(svg|gif)(?:\?|$)/i.test(candidate.imageUrl)
           && candidate.evidence.some((evidence) => evidence.association !== "none" && !evidence.forbidden))
           .slice(0, 40).map((candidate) => ({ ...candidate, categoryHint: gaps[0] }));

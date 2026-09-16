@@ -9,3 +9,6 @@ coverage/
 test-reports/
 tmp-live-artifacts/
 *.tsbuildinfo
+
+test-results/
+playwright-report/

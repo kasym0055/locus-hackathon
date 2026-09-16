@@ -1,13 +1,5 @@
+import { SearchForm } from "@/components/search-form";
 export default function Home() {
-  return (
-    <main>
-      <p>Visual University Profile</p>
-      <h1>Find a university worth seeing.</h1>
-      <form action="#" role="search">
-        <label htmlFor="university-query">Search universities</label>
-        <input id="university-query" name="query" placeholder="Try a university name" type="search" />
-        <button type="submit">Search</button>
-      </form>
-    </main>
-  );
+  return <main><p className="eyebrow">Visual University Profile</p><h1>Find a university worth seeing.</h1>
+    <p className="intro">Explore campus photos with evidence, a verification score and a link to the original publisher.</p><SearchForm /></main>;
 }
