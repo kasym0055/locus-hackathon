@@ -154,18 +154,23 @@ describe("publisher-first discovery", () => {
     const pages = new Map([
       ["https://example.edu/", '<figure><img src="/official.jpg"><figcaption>Our beautiful atrium at Example University.</figcaption></figure>'],
       ["https://example.edu/campus", '<figure><img src="/tour.jpg"><figcaption>Visitors can tour our beautiful atrium at Example University.</figcaption></figure>'],
+      ["https://example.edu/news", "<main>No relevant image</main>"],
+      ["https://example.edu/about", "<main>No relevant image</main>"],
+      ["https://independent.example/story", '<figure><img src="/unlicensed.jpg"><figcaption>Example University campus</figcaption></figure>'],
       ["https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg", `<h1>File:Example University atrium.jpg</h1>
         <div class="fullMedia"><a class="internal" href="${original}">Original file</a></div>
         <table><tr><td id="fileinfotpl_desc">Description</td><td>Example University, main atrium. Example City, KZ</td></tr>
         <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer</td></tr></table>
         <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`],
     ]);
-    const searches: string[] = [];
+    const searches: string[] = []; let fetches = 0;
     const discover = createDiscoveryPlanner({
-      fetchPage: async (url) => ({ ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }),
+      fetchPage: async (url) => { if (++fetches > 4) throw { code: "budget_exhausted" };
+        return { ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }; },
       search: async (input) => { searches.push(input.kind); return input.kind === "web"
-        ? [{ pageUrl: "https://example.edu/campus", policy: discoveryPolicy }]
-        : [{ pageUrl: "https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg", imageUrl: original, policy: discoveryPolicy }]; },
+        ? ["campus", "news", "about"].map((page) => ({ pageUrl: `https://example.edu/${page}`, policy: discoveryPolicy }))
+        : [{ pageUrl: "https://independent.example/story", imageUrl: "https://independent.example/unlicensed.jpg", policy: discoveryPolicy },
+          { pageUrl: "https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg", imageUrl: original, policy: discoveryPolicy }]; },
       publisherPolicies: new Map([
         ["https://commons.wikimedia.org", grant("https://commons.wikimedia.org")],
         ["https://upload.wikimedia.org", grant("https://upload.wikimedia.org")],
@@ -173,6 +178,7 @@ describe("publisher-first discovery", () => {
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
     expect(searches).toEqual(["web", "images"]);
+    expect(fetches).toBe(4);
     expect(candidate).toMatchObject({ imageUrl: original, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Fixture Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",

@@ -102,7 +102,9 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const terms = gaps.slice(0, 3).map((category) => category.replaceAll("_", " ")).join(" ");
     for (const domain of university.officialDomains.slice(0, 2)) {
       const results = await search({ query: `site:${domain} ${university.name} ${terms}`, kind: "web" }, ctx);
-      for (const result of results.slice(0, 3)) {
+      // Preserve the shared eight-page request budget for the licensed-image
+      // fallback. The strongest official result is sufficient for M1 evidence.
+      for (const result of results.slice(0, 1)) {
         if (!official(result.pageUrl)) continue;
         const candidates = await inspect(result.pageUrl, result.policy);
         const admitted = eligible(candidates, true);
