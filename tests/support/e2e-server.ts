@@ -14,7 +14,11 @@ globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
   const address = String(url);
   return /api\.openai\.com|wikidata\.org/.test(address) ? activeFixture.providerFetch(url, init) : realFetch(url, init);
 }) as typeof fetch;
-const config = { origin, secret: fixtureSecret, clientIp: () => "198.51.100.4" };
+const requestWork = new Set<Promise<void>>();
+const config = { origin, secret: fixtureSecret, clientIp: () => "198.51.100.4", waitUntil(work: Promise<void>) {
+  requestWork.add(work);
+  void work.then(() => requestWork.delete(work), error => { requestWork.delete(work); console.error("Fixture request cleanup failed", error); });
+} };
 const profile = createProfileHandler({ ...config, services: async () => activeFixture.services });
 const session = createSessionHandler(config);
 const server = createServer(async (incoming, outgoing) => {
@@ -31,4 +35,4 @@ const server = createServer(async (incoming, outgoing) => {
   outgoing.end();
 });
 server.listen(port, "localhost");
-process.once("SIGTERM", () => { server.close(); void fixture.close(); void hanging.close(); });
+process.once("SIGTERM", () => { server.close(); void Promise.allSettled([...requestWork]).then(() => Promise.all([fixture.close(), hanging.close()])); });

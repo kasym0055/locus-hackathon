@@ -4,6 +4,7 @@ import { failureSchema } from "@/lib/event-schema";
 import { decide } from "@/server/policy/decide";
 import { assembleProfile } from "./assemble";
 import { productionServices, type ProfileServices } from "./services";
+import { LeaseReleaseFailure, releaseLease } from "./release";
 const normalized = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function support(evidence: Evidence, university: University, assessment: Assessment): Evidence {
@@ -86,10 +87,13 @@ export function createProfileRunner(services: ProfileServices) {
     } catch (error) {
       const code = failureCode(error, ctx); warnings.push(code);
       emit({ type: "warning", data: { code, message: code === "deadline" ? "The request reached its time limit." : "Some evidence could not be retrieved or verified." } }); final();
-    } finally { if (lease) await services.ledger.release(ctx.requestId).catch(() => {}); }
+    } finally { if (lease) await releaseLease(services.ledger, ctx.requestId); }
   };
 }
 export async function runProfile(query: ProfileQuery, ctx: RunContext, emit: Emit): Promise<void> {
   try { await createProfileRunner(await productionServices())(query, ctx, emit); }
-  catch { emit({ type: "final", data: { state: "unavailable", profile: null, elapsedMs: Math.max(0, Date.now() - ctx.startedAt) } }); }
+  catch (error) {
+    if (error instanceof LeaseReleaseFailure) throw error;
+    emit({ type: "final", data: { state: "unavailable", profile: null, elapsedMs: Math.max(0, Date.now() - ctx.startedAt) } });
+  }
 }

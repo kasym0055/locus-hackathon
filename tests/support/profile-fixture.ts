@@ -7,14 +7,14 @@ export const fixtureOrigin = "https://app.example";
 export const fixtureSecret = "authored-session-secret-at-least-32-characters";
 export const fixtureGrant = { origin: "https://example.edu", retention: "transient_only" as const, display: "direct_permitted" as const,
   policyVersion: "fixture-v1", basis: ["Authored test publisher grants direct display"], attributionText: "Synthetic Author" };
-export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; universityPlace?: string; grantExpiresAt?: string; onAssessment?: () => void; redirectMetadata?: "empty" | "missing-final" | "credentials" | "too-many" | "non-array" } = {}) {
+export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; universityPlace?: string; grantExpiresAt?: string; onAssessment?: () => void; release?: () => Promise<void>; redirectMetadata?: "empty" | "missing-final" | "credentials" | "too-many" | "non-array" } = {}) {
   const universityName = options.universityName ?? "Example University";
   const universityPlace = options.universityPlace ?? "Example City";
-  let released = 0, admitted = 0, providerCalls = 0, abortedAi = false;
+  let released = 0, releaseCompleted = 0, admitted = 0, providerCalls = 0, abortedAi = false;
   const interpretationContexts: unknown[] = [];
   const contexts: Array<{ startedAt: number; deadlineAt: number; requestId: string }> = [];
   const ledger: Ledger = { admit: async ctx => { admitted++; contexts.push(ctx); return { allowed: !options.busy, retryAfterSeconds: options.busy ? 2 : 0 }; },
-    release: async () => { released++; }, check: async () => {}, renew: async () => {}, reserve: async () => "synthetic-reservation", settle: async () => {} };
+    release: async () => { released++; await options.release?.(); releaseCompleted++; }, check: async () => {}, renew: async () => {}, reserve: async () => "synthetic-reservation", settle: async () => {} };
   const raster = await sharp({ create: { width: 640, height: 480, channels: 3, background: "#83977a" } }).png().toBuffer();
   const caption = options.caption ?? `${options.conflict ? "Partner University, Other City" : `${universityName}, ${universityPlace}`} campus courtyard.`;
   const html = `<html><title>${universityName}</title><body><h1>${universityName}</h1><address>${universityPlace}, Example Country <a href="mailto:info@example.edu">Contact</a></address><figure><img src="${options.crossOrigin ? "https://third-party.example/campus.png" : "/campus.png"}"><figcaption>${caption}</figcaption></figure></body></html>`;
@@ -57,5 +57,5 @@ export async function profileFixture(options: { conflict?: boolean; permit?: boo
     throw new Error("Unexpected external request in fixture");
   };
   const services = createProfileServices({ ledger, fetcher, providerFetch, apiKey: "synthetic-key", model: "gpt-5.6-luna", braveKey: "synthetic-key", policies: options.permit === false ? new Map() : new Map([[fixtureGrant.origin, { ...fixtureGrant, ...(options.grantExpiresAt ? { expiresAt: options.grantExpiresAt } : {}) }], ...(options.imageGrant ? [["https://third-party.example", { ...fixtureGrant, origin: "https://third-party.example", attributionText: "Synthetic image host" }] as const] : [])]) });
-  return { services, providerFetch, close: transport.close, raster, contexts, interpretationContexts, stats: () => ({ released, admitted, providerCalls, abortedAi }) };
+  return { services, providerFetch, close: transport.close, raster, contexts, interpretationContexts, stats: () => ({ released, releaseCompleted, admitted, providerCalls, abortedAi }) };
 }

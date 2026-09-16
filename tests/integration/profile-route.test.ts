@@ -4,16 +4,24 @@ import { createSessionHandler } from "@/server/profile/session";
 import { readEvents } from "@/lib/read-events";
 import type { ProfileEvent } from "@/lib/events";
 import { fixtureOrigin, fixtureSecret, profileFixture } from "../support/profile-fixture";
+vi.mock("next/server", () => ({ after: vi.fn((work: Promise<void>) => { void work.catch(() => {}); }) }));
+const waitUntil = (work: Promise<void>) => { void work.catch(() => {}); };
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.unstubAllGlobals(); await Promise.all(cleanup.splice(0).map(fn => fn())); });
 async function scenario(options: Parameters<typeof profileFixture>[0] = {}) {
   const fixture = await profileFixture(options); cleanup.push(fixture.close); vi.stubGlobal("fetch", fixture.providerFetch);
-  const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4" };
+  const lifecycle: Promise<void>[] = [];
+  const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4", waitUntil: (work: Promise<void>) => { lifecycle.push(work); void work.catch(() => {}); } };
   const session = await createSessionHandler(config)(new Request(`${fixtureOrigin}/api/session`, { method: "POST", headers: { origin: fixtureOrigin } }));
   const cookie = session.headers.get("set-cookie")!.split(";")[0];
   const handler = createProfileHandler({ ...config, services: async () => fixture.services });
   const request = (body: unknown = { query: "Example University", countryHint: "" }, extra: Record<string, string> = {}) => new Request(`${fixtureOrigin}/api/profile`, { method: "POST", headers: { origin: fixtureOrigin, cookie, "content-type": "application/json", ...extra }, body: JSON.stringify(body) });
-  return { fixture, handler, request, session };
+  return { fixture, handler, request, session, lifecycle };
 }
 async function events(response: Response) { const seen: ProfileEvent[] = []; await readEvents(response.body!, event => seen.push(event), new AbortController().signal); return seen; }
 it("streams a real pipeline through external fixtures to a source-linked score-80 card", async () => {
@@ -63,7 +71,7 @@ it("fails closed without server configuration", async () => {
 it("does not wait past the receipt deadline for an unfinished body", async () => {
   vi.useFakeTimers(); let bodyCancelled = false;
   try {
-    const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4" };
+    const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4", waitUntil };
     const session = await createSessionHandler(config)(new Request(`${fixtureOrigin}/api/session`, { method: "POST", headers: { origin: fixtureOrigin } }));
     const cookie = session.headers.get("set-cookie")!.split(";")[0];
     const request = new Request(`${fixtureOrigin}/api/profile`, { method: "POST", headers: { origin: fixtureOrigin, cookie, "content-type": "application/json" },
@@ -82,7 +90,7 @@ it("retains an existing signed session rather than refreshing its rate-limit ide
 });
 it("cancels model transport and releases admission on client disconnect", async () => {
   const fixture = await profileFixture({ hangAi: true }); cleanup.push(fixture.close); vi.stubGlobal("fetch", fixture.providerFetch);
-  const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4" };
+  const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4", waitUntil };
   const session = await createSessionHandler(config)(new Request(`${fixtureOrigin}/api/session`, { method: "POST", headers: { origin: fixtureOrigin } }));
   const request = new Request(`${fixtureOrigin}/api/profile`, { method: "POST", headers: { origin: fixtureOrigin, cookie: session.headers.get("set-cookie")!.split(";")[0], "content-type": "application/json" }, body: JSON.stringify({ query: "Example University", countryHint: "" }) });
   const response = await createProfileHandler({ ...config, services: async () => fixture.services })(request);
@@ -93,13 +101,15 @@ it("cancels model transport and releases admission on client disconnect", async 
   await vi.waitFor(() => expect(fixture.stats()).toMatchObject({ released: 1, abortedAi: true }));
 });
 it("uses the production route's unavailable response when configuration is absent", async () => {
+  const { after } = await import("next/server"); vi.mocked(after).mockClear();
   const { POST } = await import("@/app/api/profile/route");
   const response = await POST(new Request(`${fixtureOrigin}/api/profile`, { method: "POST", headers: { origin: fixtureOrigin }, body: "{}" }));
   expect(response.status).toBe(503); expect((await events(response))[0]).toMatchObject({ type: "fatal", data: { code: "dependency_unavailable" } });
+  expect(after).toHaveBeenCalledExactlyOnceWith(expect.any(Promise));
 });
 it.each(["oversizedIdentity", "oversizedWire"] as const)("keeps contiguous framing when %s cannot be serialized", async kind => {
   const fixture = await profileFixture({ [kind]: true }); cleanup.push(fixture.close); vi.stubGlobal("fetch", fixture.providerFetch);
-  const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4" };
+  const config = { origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4", waitUntil };
   const session = await createSessionHandler(config)(new Request(`${fixtureOrigin}/api/session`, { method: "POST", headers: { origin: fixtureOrigin } }));
   const request = new Request(`${fixtureOrigin}/api/profile`, { method: "POST", headers: { origin: fixtureOrigin, cookie: session.headers.get("set-cookie")!.split(";")[0], "content-type": "application/json" }, body: JSON.stringify({ query: "Example University", countryHint: "" }) });
   const seen = await events(await createProfileHandler({ ...config, services: async () => fixture.services })(request));
@@ -201,4 +211,78 @@ it("withholds oversized decomposed captions whose truncated prefix normalizes to
   expect(seen.find(event => event.type === "identity")).toMatchObject({ data: { university: { name: universityName } } });
   expect(seen.filter(event => event.type === "image")).toHaveLength(0);
   expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
+});
+it.each([false, true])("holds response EOF until lease release completes, fatal=%s", async oversizedIdentity => {
+  const gate = deferred();
+  const { fixture, handler, request, lifecycle } = await scenario({ oversizedIdentity, release: () => gate.promise });
+  let finished = false;
+  const reading = events(await handler(request())).then(seen => { finished = true; return seen; });
+  try {
+    await vi.waitFor(() => expect(fixture.stats().released).toBe(1));
+    expect(fixture.stats().releaseCompleted).toBe(0);
+    expect(finished).toBe(false);
+    expect(lifecycle).toHaveLength(1);
+  } finally { gate.resolve(); await reading; }
+  const seen = await reading;
+  expect(seen.filter(event => event.type === "final" || event.type === "fatal")).toHaveLength(1);
+  expect(seen.at(-1)?.type).toBe(oversizedIdentity ? "fatal" : "final");
+  await lifecycle[0];
+  expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 1 });
+});
+it.each(["stream", "request"])("tracks in-flight %s cancellation until its single delayed release completes", async kind => {
+  const gate = deferred();
+  const { fixture, handler, request, lifecycle } = await scenario({ hangAi: true, release: () => gate.promise });
+  const disconnect = new AbortController();
+  const response = await handler(new Request(request(), { signal: disconnect.signal })); const reader = response.body!.getReader();
+  try {
+    await vi.waitFor(() => expect(fixture.stats().providerCalls).toBe(3));
+    if (kind === "stream") await reader.cancel(); else disconnect.abort();
+    await vi.waitFor(() => expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 0, abortedAi: true }));
+    expect(lifecycle).toHaveLength(1);
+    let settled = false; void lifecycle[0].then(() => { settled = true; });
+    await Promise.resolve(); expect(settled).toBe(false);
+  } finally { gate.resolve(); await Promise.all(lifecycle); await reader.cancel(); reader.releaseLock(); }
+  expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 1 });
+});
+it("bounds and reports stalled cancellation release through the registered lifecycle", async () => {
+  const { fixture, handler, request, lifecycle } = await scenario({ hangAi: true, release: () => new Promise<void>(() => {}) });
+  const reader = (await handler(request())).body!.getReader();
+  await vi.waitFor(() => expect(fixture.stats().providerCalls).toBe(3));
+  await reader.cancel(); reader.releaseLock();
+  expect(lifecycle).toHaveLength(1);
+  await expect(lifecycle[0]).rejects.toMatchObject({ code: "dependency_unavailable" });
+  expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 0, abortedAi: true });
+});
+it("reports release failure as a stream error without a second terminal frame", async () => {
+  const { fixture, handler, request, lifecycle } = await scenario({ release: async () => { throw new Error("fixture release failed"); } });
+  const seen: ProfileEvent[] = [];
+  await expect(readEvents((await handler(request())).body!, event => seen.push(event), new AbortController().signal)).rejects.toThrow("protocol_error");
+  expect(seen.filter(event => event.type === "final" || event.type === "fatal").length).toBeLessThanOrEqual(1);
+  expect(lifecycle).toHaveLength(1);
+  await expect(lifecycle[0]).rejects.toMatchObject({ code: "dependency_unavailable" });
+  expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 0 });
+});
+it("tracks disconnect during admission and releases once before a pre-stream failure response", async () => {
+  const admissionGate = deferred(), releaseGate = deferred();
+  const { fixture, handler, request, lifecycle } = await scenario({ release: () => releaseGate.promise });
+  const admit = fixture.services.ledger.admit;
+  fixture.services.ledger.admit = async ctx => { const result = await admit(ctx); await admissionGate.promise; return result; };
+  const disconnect = new AbortController(); let finished = false;
+  const response = handler(new Request(request(), { signal: disconnect.signal })).then(value => { finished = true; return value; });
+  try {
+    await vi.waitFor(() => expect(fixture.stats().admitted).toBe(1));
+    expect(lifecycle).toHaveLength(1);
+    disconnect.abort(); admissionGate.resolve();
+    await vi.waitFor(() => expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 0 }));
+    expect(finished).toBe(false);
+  } finally { admissionGate.resolve(); releaseGate.resolve(); await response; await lifecycle[0]; }
+  expect((await response).status).toBe(503);
+  expect(fixture.stats()).toMatchObject({ released: 1, releaseCompleted: 1, providerCalls: 0 });
+});
+it("fails before admission if the host cannot register the request lifecycle", async () => {
+  const { fixture, request } = await scenario();
+  const response = await createProfileHandler({ origin: fixtureOrigin, secret: fixtureSecret, clientIp: () => "198.51.100.4",
+    services: async () => fixture.services, waitUntil: () => { throw new Error("unsupported host lifecycle"); } })(request());
+  expect(response.status).toBe(503);
+  expect(fixture.stats()).toMatchObject({ admitted: 0, released: 0, providerCalls: 0 });
 });
