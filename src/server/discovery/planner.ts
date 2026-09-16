@@ -19,6 +19,10 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const officialSupport: Evidence[] = [];
     let fallback: Candidate[] = [];
     let lastFailure: unknown;
+    const commons = dependencies.publisherPolicies?.get("https://commons.wikimedia.org");
+    const uploads = dependencies.publisherPolicies?.get("https://upload.wikimedia.org");
+    const licensedPublisherReady = commons?.display === "direct_permitted" && commons.retention !== "disallowed"
+      && uploads?.display === "direct_permitted" && uploads.retention !== "disallowed";
     const official = (url: string) => university.officialDomains.some((domain) => {
       const host = new URL(url).hostname; return host === domain || host.endsWith(`.${domain}`);
     });
@@ -128,27 +132,26 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       const admitted = eligible(candidates, true);
       if (admitted.length) return admitted;
     }
-    for (const url of navigation.slice(0, 1)) {
-      const candidates = await inspect(url, publisherIdentityPolicy);
-      const admitted = eligible(candidates, true);
-      if (admitted.length) return admitted;
-    }
     const terms = gaps.slice(0, 3).map((category) => category.replaceAll("_", " ")).join(" ");
-    for (const domain of university.officialDomains.slice(0, 2)) {
-      const results = await search({ query: `site:${domain} ${university.name} ${terms}`, kind: "web" }, ctx);
-      // Preserve the shared eight-page request budget for the licensed-image
-      // fallback. The strongest official result is sufficient for M1 evidence.
-      for (const result of results.slice(0, 1)) {
-        if (!official(result.pageUrl)) continue;
-        const candidates = await inspect(result.pageUrl, result.policy);
+    if (!licensedPublisherReady) {
+      for (const url of navigation.slice(0, 1)) {
+        const candidates = await inspect(url, publisherIdentityPolicy);
         const admitted = eligible(candidates, true);
         if (admitted.length) return admitted;
       }
+      for (const domain of university.officialDomains.slice(0, 2)) {
+        const results = await search({ query: `site:${domain} ${university.name} ${terms}`, kind: "web" }, ctx);
+        // Preserve the shared eight-page request budget for the licensed-image
+        // fallback. The strongest official result is sufficient for M1 evidence.
+        for (const result of results.slice(0, 1)) {
+          if (!official(result.pageUrl)) continue;
+          const candidates = await inspect(result.pageUrl, result.policy);
+          const admitted = eligible(candidates, true);
+          if (admitted.length) return admitted;
+        }
+      }
     }
-    const commons = dependencies.publisherPolicies?.get("https://commons.wikimedia.org");
-    const uploads = dependencies.publisherPolicies?.get("https://upload.wikimedia.org");
-    if (commons?.display === "direct_permitted" && commons.retention !== "disallowed"
-      && uploads?.display === "direct_permitted" && uploads.retention !== "disallowed") {
+    if (licensedPublisherReady) {
       const title = encodeURIComponent(university.name.replace(/\s+/gu, "_"));
       const licensedPublisherDiscoveryPolicy = { ...publisherIdentityPolicy };
       await inspect(`https://commons.wikimedia.org/wiki/Category:${title}`, licensedPublisherDiscoveryPolicy);

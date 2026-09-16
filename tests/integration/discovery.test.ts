@@ -177,8 +177,8 @@ describe("publisher-first discovery", () => {
       ]),
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
-    expect(searches).toEqual(["web", "images"]);
-    expect(fetches).toBe(5);
+    expect(searches).toEqual(["images"]);
+    expect(fetches).toBe(4);
     expect(candidate).toMatchObject({ imageUrl: original, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Fixture Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
@@ -202,28 +202,32 @@ describe("publisher-first discovery", () => {
     const event = "https://commons.wikimedia.org/wiki/File:Example_University_Astana.jpg";
     const target = "https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg";
     const corroboration = "https://example.edu/news/atrium";
+    const about = "https://example.edu/about";
     const pages = new Map([
       ["https://example.edu/", '<a href="/campus">Campus tour</a><main>Example University</main>'],
       ["https://example.edu/campus", "<main>Campus visitor information.</main>"],
+      [about, "<main>General university information.</main>"],
       [corroboration, '<figure><img src="/news.jpg"><figcaption>Our beautiful main atrium welcomes campus visitors.</figcaption></figure>'],
       [category, `<div class="gallery"><a href="/wiki/File:Example_University_Astana.jpg">University</a>
         <a href="/wiki/File:Example_University_atrium.jpg">Atrium</a></div>`],
       [event, filePage(unrelatedOriginal, "Example University ceremony. Example City, KZ", "Event Photographer")],
       [target, filePage(targetOriginal, "Example University, main atrium. Example City, KZ", "Campus Photographer")],
     ]);
-    const searches: string[] = []; const fetched: string[] = [];
+    const searches: string[] = []; const fetched: string[] = []; let sharedFetches = 2;
     const discover = createDiscoveryPlanner({
-      fetchPage: async (url) => { fetched.push(url); return { ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }; },
-      search: async (input) => { searches.push(`${input.kind}:${input.query}`); return input.kind === "web" && input.query.includes('"atrium"')
-        ? [{ pageUrl: corroboration, policy: discoveryPolicy }] : []; },
+      fetchPage: async (url) => { if (++sharedFetches > 8) throw { code: "budget_exhausted" }; fetched.push(url);
+        return { ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }; },
+      search: async (input) => { searches.push(`${input.kind}:${input.query}`); return input.kind !== "web" ? []
+        : input.query.includes('"atrium"') ? [{ pageUrl: corroboration, policy: discoveryPolicy }]
+        : [{ pageUrl: about, policy: discoveryPolicy }]; },
       publisherPolicies: new Map([
         ["https://commons.wikimedia.org", grant("https://commons.wikimedia.org")],
         ["https://upload.wikimedia.org", grant("https://upload.wikimedia.org")],
       ]),
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
-    expect(searches).toEqual([expect.stringMatching(/^web:site:example\.edu/), 'web:site:example.edu "atrium" Example University']);
-    expect(fetched).toEqual(["https://example.edu/", "https://example.edu/campus", category, event, target, corroboration]);
+    expect(searches).toEqual(['web:site:example.edu "atrium" Example University']);
+    expect(fetched).toEqual(["https://example.edu/", category, event, target, corroboration]);
     expect(candidate).toMatchObject({ imageUrl: targetOriginal, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Campus Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
