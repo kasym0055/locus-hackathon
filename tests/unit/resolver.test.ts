@@ -41,6 +41,19 @@ describe("conservative institution resolution", () => {
     expect((await resolve({ query: identity.name, countryHint: "" }, contextFixture())).kind).not.toBe("resolved");
     expect(searches).toHaveLength(1);
   });
+  it("prioritizes a same-domain contact result without spending publisher fetches on generic results", async () => {
+    const inspected: string[] = [];
+    const resolve = createResolver({ lookup: async () => [identity], search: async () => [
+      { pageUrl: "https://example.edu/research", policy: transientPolicy },
+      { pageUrl: "https://example.edu/news", policy: transientPolicy },
+      { pageUrl: "https://example.edu/about/contacts", policy: transientPolicy },
+    ], fetchPage: async (url) => {
+      inspected.push(url);
+      return { ...publisherFixture(url.includes("contacts") ? official : "<title>Example University</title><h1>Example University</h1>"), finalUrl: url };
+    } });
+    expect(await resolve({ query: identity.name, countryHint: "" }, contextFixture())).toMatchObject({ kind: "resolved" });
+    expect(inspected).toEqual(["https://example.edu/", "https://example.edu/about/contacts"]);
+  });
   it("returns competing credible identities instead of choosing the first", async () => {
     const resolve = createResolver({ lookup: async () => [identity, { ...identity, entityId: "Q456", website: "https://example2.edu/" }],
       search: async () => [], fetchPage: async (url) => ({ ...publisherFixture(official.replaceAll("example.edu", new URL(url).hostname)), finalUrl: url }) });

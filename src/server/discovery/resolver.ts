@@ -58,6 +58,14 @@ function separatePublisher(a: string, b: string): boolean {
   const scope = (value: string) => new URL(value).hostname.split(".").slice(-2).join(".");
   return scope(a) !== scope(b);
 }
+function identityPagePriority(value: string): number {
+  try {
+    const path = decodeURIComponent(new URL(value).pathname).toLocaleLowerCase("und");
+    if (/contact|kontakt|контакт|байланыс/iu.test(path)) return 2;
+    if (/about|location|visit/iu.test(path)) return 1;
+  } catch { /* Search records are validated separately; an invalid URL ranks last. */ }
+  return 0;
+}
 
 function hasOfficialContact($: CheerioAPI, domain: string, city: string, country: string): boolean {
   const scopes = new Set<string>();
@@ -185,10 +193,13 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
         try { records = await search({ query: `${query.query} ${query.countryHint} official university contact`, kind: "web" }, ctx); }
         catch { assertActive(ctx); failed = true; }
         if (!relevant.length) await recoverFromPublishers(records);
-        for (const record of records.slice(0, 5)) {
-          for (const identity of relevant) {
-            if (resolved.has(identity.entityId)) continue;
-            if (!identity.website || sameHost(record.pageUrl, new URL(identity.website).hostname)) await verify(identity, record.pageUrl, record.policy);
+        for (const identity of relevant) {
+          const candidates = records.filter((record) => !identity.website || sameHost(record.pageUrl, new URL(identity.website).hostname))
+            .map((record, index) => ({ record, index, priority: identityPagePriority(record.pageUrl) }))
+            .sort((a, b) => b.priority - a.priority || a.index - b.index).slice(0, 2);
+          for (const { record } of candidates) {
+            if (resolved.has(identity.entityId)) break;
+            await verify(identity, record.pageUrl, record.policy);
           }
         }
       }
