@@ -87,6 +87,17 @@ describe("real adapter HTTP boundaries", () => {
     expect(requests.map((url) => url.searchParams.get("action"))).toEqual(["wbsearchentities", "wbgetentities"]);
     expect(requests[0].searchParams.get("limit")).toBe("5");
   });
+  it.each([
+    "international research university based in Astana, Kazakhstan",
+    "education organization in Astana, Kazakhstan",
+  ])("projects the location from the observed Wikidata description: %s", async (description) => {
+    const lookup = createWikidataLookup({ fetch: async (url) => Response.json(new URL(String(url)).searchParams.get("action") === "wbsearchentities"
+      ? { success: 1, search: [{ id: "Q123", label: "Example University", description }] }
+      : { success: 1, entities: { Q123: { id: "Q123", labels: { en: { value: "Example University" } }, aliases: {}, descriptions: { en: { value: description } }, claims: {
+        P856: [{ rank: "normal", mainsnak: { snaktype: "value", datavalue: { value: "https://example.edu/" } } }],
+      } } } }) });
+    expect(await lookup("Example University", contextFixture())).toEqual([expect.objectContaining({ city: "Astana", country: "Kazakhstan" })]);
+  });
   it.each(["Примерный университет", "Үлгі университеті"])("keeps the Wikidata full label %s through publisher verification", async (localizedName) => {
     let requests = 0; const inspected: string[] = [];
     const lookup = createWikidataLookup({ fetch: async (url) => {

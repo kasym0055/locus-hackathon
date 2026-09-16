@@ -37,7 +37,7 @@ export function createWikidataLookup(dependencies: { fetch?: typeof fetch } = {}
         .map((claim) => claim.mainsnak.datavalue?.value).filter((value): value is string => typeof value === "string" && httpUrl(value));
       // Only an explicit descriptive location is exposed; entity IDs never become invented place names.
       // Missing/other description forms remain unresolved within the two-request bound.
-      const location = /^(?:public |private |research |technical |national )*(?:university|institute of technology) in ([^,;]+), ([^,;]+)$/iu.exec(entity.descriptions.en?.value ?? "");
+      const location = /^(?:(?:public|private|research|technical|national|international)\s+)*(?:university|institute of technology|education(?:al)? organization)\s+(?:based\s+)?in\s+([^,;]+),\s*([^,;]+)$/iu.exec(entity.descriptions.en?.value ?? "");
       return [{ entityId: id, name, aliases: [...new Set([
         ...Object.values(entity.labels).map((label) => label.value),
         ...Object.values(entity.aliases).flatMap((items) => items.map((item) => item.value)),

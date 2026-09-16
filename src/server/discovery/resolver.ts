@@ -59,6 +59,32 @@ function separatePublisher(a: string, b: string): boolean {
   return scope(a) !== scope(b);
 }
 
+function hasOfficialContact($: CheerioAPI, domain: string, city: string, country: string): boolean {
+  const scopes = new Set<string>();
+  const add = (element: Parameters<CheerioAPI>[0]) => {
+    const node = $(element);
+    const links = [
+      ...(node.is("a[href^='mailto:']") ? [node.attr("href")] : []),
+      ...node.find("a[href^='mailto:']").toArray().map((anchor) => $(anchor).attr("href")),
+    ].filter((value): value is string => Boolean(value)).map((value) => value.slice(7).split("?")[0]);
+    const visible = [...node.toArray(), ...node.find("*").toArray()].flatMap((item) => $(item).contents().toArray())
+      .filter((item) => item.type === "text").map((item) => $(item).text()).join(" ");
+    const text = normalizeQuery(`${visible} ${links.join(" ")}`);
+    if (text && text.length <= 5_000) scopes.add(text);
+  };
+  $("address, [itemprop='address'], footer, [class*='contact'], [id*='contact']").toArray().forEach(add);
+  for (const anchor of $("a[href^='mailto:']").toArray()) {
+    let node = $(anchor);
+    for (let depth = 0; depth < 8 && node.length; depth++, node = node.parent()) add(node[0]);
+  }
+  return [...scopes].some((text) => {
+    const location = text.includes(normalizeQuery(city)) && text.includes(normalizeQuery(country));
+    const email = text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/giu)
+      ?.some((address) => { const host = address.split("@").at(-1)?.toLowerCase(); return host === domain || host?.endsWith(`.${domain}`); });
+    return location && email === true;
+  });
+}
+
 export function createResolver(dependencies: { lookup?: Lookup; search?: Search; fetchPage?: PageFetcher } = {}) {
   const lookup = dependencies.lookup ?? lookupWikidata;
   const search = dependencies.search ?? searchBrave;
@@ -103,17 +129,10 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
           const city = identity.city ?? structured?.city;
           const country = identity.country ?? structured?.country;
           if (!city || !country) return;
-          const contact = normalizeQuery($("address, [itemprop='address'], footer, [class*='contact'], [id*='contact']").text());
-          const email = $("a[href^='mailto:']").toArray().some((element) => {
-            const value = $(element).attr("href")?.slice(7).split("?")[0] ?? "";
-            const host = value.split("@")[1]?.toLowerCase();
-            return host === domain || host?.endsWith(`.${domain}`);
-          });
-          const location = contact.includes(normalizeQuery(city)) && contact.includes(normalizeQuery(country));
           const sameAs = $("a[href]").toArray().some((element) => $(element).attr("href") === `https://www.wikidata.org/wiki/${identity.entityId}`)
             || $("script[type='application/ld+json']").toArray().some((element) => $(element).text().includes(`https://www.wikidata.org/wiki/${identity.entityId}`));
           // A missing Wikidata website needs an explicit entity link on the original page.
-          if (!matchingName || !email || !location || (!identity.website && !sameAs)) return;
+          if (!matchingName || !hasOfficialContact($, domain, city, country) || (!identity.website && !sameAs)) return;
           const publisherPolicy = inherited ? mergePolicy(inherited, publisherIdentityPolicy) : publisherIdentityPolicy;
           resolved.set(identity.entityId, { id: identity.entityId, name: identity.name, aliases: identity.aliases,
             campus: city, city, country, officialDomains: [domain], sources: [

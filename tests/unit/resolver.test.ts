@@ -22,6 +22,17 @@ describe("conservative institution resolution", () => {
     expect(result.university).toMatchObject({ id: "Q123", city: "Example City", country: "Example Country", officialDomains: ["example.edu"] });
     expect(result.university.sources.map((source) => source.url)).toEqual(["https://www.wikidata.org/wiki/Q123", "https://example.edu/news/visit"]);
   });
+  it.each([
+    ["plain footer email", `<footer>Example University · Example City, Example Country · info@example.edu</footer>`],
+    ["element-separated footer email", `<footer><span>Example University · Example City, Example Country</span><span>+1 555 0100</span><span>info@example.edu</span><span>License</span></footer>`],
+    ["nonsemantic mail link container", `<div><div>Example University · Example City, Example Country <p><a href="mailto:info@example.edu">Contact</a></p></div></div>`],
+  ])("accepts official-domain contact evidence in an observed publisher %s", async (_case, contact) => {
+    const resolve = createResolver({ lookup: async () => [identity], search: async () => [],
+      fetchPage: async () => publisherFixture(`<title>Example University</title><h1>Example University</h1>${contact}`) });
+    expect(await resolve({ query: identity.name, countryHint: "" }, contextFixture())).toMatchObject({
+      kind: "resolved", university: { city: "Example City", country: "Example Country" },
+    });
+  });
   it("rejects a matching title without contact/city corroboration and attempts fallback", async () => {
     const searches: string[] = [];
     const resolve = createResolver({ lookup: async () => [identity],
