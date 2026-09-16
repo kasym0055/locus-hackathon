@@ -2,6 +2,25 @@ import type { FetchResult, RunContext, University, UsagePolicy } from "@/server/
 import { createServer, type RequestListener } from "node:http";
 import { connect, type Socket } from "node:net";
 import type { buildConnector } from "undici";
+import type { Evidence } from "@/server/contracts";
+import type { decide } from "@/server/policy/decide";
+
+export function decisionFixture(patch: { authority: Evidence["authority"]; association: Evidence["association"]; corroboration: 20 | 10 | 0; visual: 10 | 5 | 0 }): Parameters<typeof decide>[0] {
+  const policy: UsagePolicy = { ...transientPolicy, display: "direct_permitted" };
+  const source = { id: "attribution-source", url: "https://example.edu/library", retrievedAt: "2026-09-16T00:00:00Z", policy };
+  return { resolved: true, usable: true, evidence: { source, imageId: "image-one", imageUrl: "https://example.edu/photo.jpg",
+    excerpt: "The selected campus library reading room.", association: patch.association, authority: patch.authority,
+    locationSupported: true, locationScope: "campus", categorySupported: true,
+    officialDirect: patch.authority === "official" && patch.association === "explicit",
+    independentEquivalent: patch.association === "explicit" && patch.corroboration === 20,
+    corroboration: patch.corroboration, corroborationEvidenceIds: patch.corroboration ? ["independent-source"] : [],
+    corroborationSources: patch.corroboration ? [{ source: { ...source, id: "independent-source", url: "https://independent.example/library" },
+      imageId: "image-one", excerpt: "Independent reporting identifies this reading room at the selected campus.",
+      independent: true, locationSupported: true }] : [], conflict: false, forbidden: false },
+    assessment: { imageId: "image-one", assessed: true, category: "library", visual: patch.visual,
+      safety: "clear", relevance: "relevant", authenticity: "photo", location: "supported",
+      evidenceIds: ["attribution-source"], observations: ["Visible shelves and reading desks."], uncertainties: [] } };
+}
 
 // Self-authored synthetic test material. Never a live demo or a factual campus source.
 export const syntheticHtml = `<!doctype html><html><head><title>Example University visit</title></head>

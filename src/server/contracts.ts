@@ -57,6 +57,12 @@ export interface Evidence {
   officialDirect: boolean; independentEquivalent: boolean;
   corroboration: 20 | 10 | 0; corroborationEvidenceIds: string[];
   conflict: boolean; forbidden: boolean;
+  locationScope?: "campus" | "city";
+  corroborationSources?: Array<{
+    source: SourceRef; imageId: string; excerpt: string;
+    independent: boolean; locationSupported: boolean;
+    visibleIdentifier?: string;
+  }>;
 }
 export interface Candidate {
   id: string; imageUrl: string; pageUrl: string; evidence: Evidence[];
@@ -65,4 +71,37 @@ export interface Candidate {
 export interface FetchResult {
   finalUrl: string; contentType: string; bytes: Uint8Array;
   retrievedAt: string; status: number;
+}
+
+// Bytes never enter persistent storage or a browser response. These are request-scoped.
+export interface ValidatedImage {
+  id: string; bytes: Uint8Array; mediaType: "image/jpeg";
+  width: number; height: number; byteLength: number;
+  originalSha256: string; sha256: string;
+}
+export interface PreparedCandidate { candidate: Candidate; image: ValidatedImage }
+export interface Assessment {
+  imageId: string; assessed: boolean; category: Category | null; visual: 10 | 5 | 0;
+  safety: "clear" | "unsafe" | "uncertain";
+  relevance: "relevant" | "irrelevant" | "uncertain";
+  authenticity: "photo" | "stock" | "render" | "uncertain";
+  location: "supported" | "conflict" | "uncertain";
+  evidenceIds: string[]; observations: string[]; uncertainties: string[];
+}
+export interface Decision {
+  status: "verified" | "uncertain" | "withheld" | "rejected";
+  score: number; components: { authority: number; attribution: number; corroboration: number; visual: number };
+  reasons: string[];
+}
+export interface AssessmentInput {
+  images: ValidatedImage[];
+  evidence: Array<{ id: string; imageId: string; excerpt: string }>;
+}
+export interface AiUsage { inputTokens: number; outputTokens: number; costMicrousd: number }
+export type AssessmentResult = { ok: true; assessments: Assessment[]; provider: "openai"; model: string; usage: AiUsage }
+  | { ok: false; code: FailureCode; provider: "openai"; model: string };
+export interface AiAdapter {
+  readonly capabilities: { imageInput: true; structuredOutput: true; cancellation: true; costAccounting: true };
+  assess(input: AssessmentInput, ctx: RunContext): Promise<AssessmentResult>;
+  describe(input: unknown, ctx: RunContext): Promise<{ ok: false; code: FailureCode }>;
 }
