@@ -7,16 +7,17 @@ export const fixtureOrigin = "https://app.example";
 export const fixtureSecret = "authored-session-secret-at-least-32-characters";
 export const fixtureGrant = { origin: "https://example.edu", retention: "transient_only" as const, display: "direct_permitted" as const,
   policyVersion: "fixture-v1", basis: ["Authored test publisher grants direct display"], attributionText: "Synthetic Author" };
-export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; grantExpiresAt?: string; onAssessment?: () => void; redirectMetadata?: "empty" | "missing-final" | "credentials" | "too-many" | "non-array" } = {}) {
+export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; universityPlace?: string; grantExpiresAt?: string; onAssessment?: () => void; redirectMetadata?: "empty" | "missing-final" | "credentials" | "too-many" | "non-array" } = {}) {
   const universityName = options.universityName ?? "Example University";
+  const universityPlace = options.universityPlace ?? "Example City";
   let released = 0, admitted = 0, providerCalls = 0, abortedAi = false;
   const interpretationContexts: unknown[] = [];
   const contexts: Array<{ startedAt: number; deadlineAt: number; requestId: string }> = [];
   const ledger: Ledger = { admit: async ctx => { admitted++; contexts.push(ctx); return { allowed: !options.busy, retryAfterSeconds: options.busy ? 2 : 0 }; },
     release: async () => { released++; }, check: async () => {}, renew: async () => {}, reserve: async () => "synthetic-reservation", settle: async () => {} };
   const raster = await sharp({ create: { width: 640, height: 480, channels: 3, background: "#83977a" } }).png().toBuffer();
-  const caption = options.caption ?? `${options.conflict ? "Partner University, Other City" : `${universityName}, Example City`} campus courtyard.`;
-  const html = `<html><title>${universityName}</title><body><h1>${universityName}</h1><address>Example City, Example Country <a href="mailto:info@example.edu">Contact</a></address><figure><img src="${options.crossOrigin ? "https://third-party.example/campus.png" : "/campus.png"}"><figcaption>${caption}</figcaption></figure></body></html>`;
+  const caption = options.caption ?? `${options.conflict ? "Partner University, Other City" : `${universityName}, ${universityPlace}`} campus courtyard.`;
+  const html = `<html><title>${universityName}</title><body><h1>${universityName}</h1><address>${universityPlace}, Example Country <a href="mailto:info@example.edu">Contact</a></address><figure><img src="${options.crossOrigin ? "https://third-party.example/campus.png" : "/campus.png"}"><figcaption>${caption}</figcaption></figure></body></html>`;
   const transport = await transportFixture((request, response) => {
     if (request.url === "/robots.txt") { response.writeHead(404); response.end(); }
     else if (options.imageRedirect && request.headers.host === "example.edu" && request.url === "/campus.png") { response.writeHead(302, { location: `https://third-party.example/${options.imageRedirect === "roundtrip" ? "intermediate.png" : "campus.png"}` }); response.end(); }
@@ -40,7 +41,7 @@ export async function profileFixture(options: { conflict?: boolean; permit?: boo
     if (String(url).includes("wikidata.org")) {
       const action = new URL(String(url)).searchParams.get("action");
       return Response.json(action === "wbsearchentities" ? { success: 1, search: [{ id: "Q123", label: universityName }] }
-        : { success: 1, entities: { Q123: { id: "Q123", labels: { en: { value: universityName } }, aliases: options.oversizedIdentity || options.oversizedWire ? { en: Array.from({ length: options.oversizedIdentity ? 51 : 50 }, (_, index) => ({ value: options.oversizedWire ? "字".repeat(1800) + index : `Alias ${index}` })) } : {}, descriptions: { en: { value: "university in Example City, Example Country" } }, claims: { P856: [{ rank: "normal", mainsnak: { snaktype: "value", datavalue: { value: "https://example.edu/" } } }] } } } });
+        : { success: 1, entities: { Q123: { id: "Q123", labels: { en: { value: universityName } }, aliases: options.oversizedIdentity || options.oversizedWire ? { en: Array.from({ length: options.oversizedIdentity ? 51 : 50 }, (_, index) => ({ value: options.oversizedWire ? "字".repeat(1800) + index : `Alias ${index}` })) } : {}, descriptions: { en: { value: `university in ${universityPlace}, Example Country` } }, claims: { P856: [{ rank: "normal", mainsnak: { snaktype: "value", datavalue: { value: "https://example.edu/" } } }] } } } });
     }
     if (String(url).includes("api.openai.com")) {
       if (options.hangAi) return new Promise<Response>((_resolve, reject) => { const stop = () => { abortedAi = true; reject(new DOMException("Aborted", "AbortError")); }; if (init?.signal?.aborted) stop(); else init?.signal?.addEventListener("abort", stop, { once: true }); });

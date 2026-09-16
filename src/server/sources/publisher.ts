@@ -7,6 +7,12 @@ const imageAttributes = ["src", "data-src", "data-original", "data-lazy-src", "d
 const compact = (value: string) => value.replace(/\s+/g, " ").trim();
 const id = (value: string) => createHash("sha256").update(value).digest("hex");
 
+function completeBinding(excerpt: string, association: Evidence["association"]): { excerpt: string; association: Evidence["association"] } {
+  // A truncated caption can hide contradictory prose. Keep the complete bounded
+  // binding or discard its association, never fall back to a shorter prefix.
+  return excerpt.length <= 2_000 ? { excerpt, association } : { excerpt: "", association: "none" };
+}
+
 function resolveImage(value: string, base: string): string | undefined {
   try {
     const url = new URL(value, base);
@@ -39,12 +45,12 @@ function bind($: CheerioAPI, imageUrl: string, base: string): { excerpt: string;
     if (!urls.includes(imageUrl) || image.closest("footer, header, nav").length) continue;
     const figure = image.closest("figure");
     const caption = compact(figure.children("figcaption").text());
-    if (figure.find("img").length === 1 && caption) return { excerpt: caption.slice(0, 2_000), association: "explicit" };
+    if (figure.find("img").length === 1 && caption) return completeBinding(caption, "explicit");
     const item = image.closest('.gallery-item, [data-gallery-item], [itemtype$="/ImageObject"]');
     const galleryCaption = compact(item.find('.caption, [itemprop="caption"]').text());
-    if (item.find("img").length === 1 && galleryCaption) return { excerpt: galleryCaption.slice(0, 2_000), association: "gallery" };
+    if (item.find("img").length === 1 && galleryCaption) return completeBinding(galleryCaption, "gallery");
     const metadata = compact(image.attr("data-caption") || image.attr("alt") || image.attr("title") || "");
-    if (metadata) return { excerpt: metadata.slice(0, 2_000), association: "explicit" };
+    if (metadata) return completeBinding(metadata, "explicit");
   }
   return { excerpt: "", association: "none" };
 }

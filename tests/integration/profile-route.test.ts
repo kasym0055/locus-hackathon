@@ -191,3 +191,14 @@ it("does not discard contradictory prose following a photo credit", async () => 
   expect(seen.filter(event => event.type === "image")).toHaveLength(0);
   expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
 });
+it("withholds oversized decomposed captions whose truncated prefix normalizes to valid ownership", async () => {
+  const universityName = "\u1f82".repeat(156), universityPlace = "\u1f82".repeat(170);
+  const prefix = `${universityName.normalize("NFD")}'s, ${universityPlace.normalize("NFD")} campus in ${universityPlace.normalize("NFD")}.`;
+  expect(prefix).toHaveLength(2000);
+  expect(prefix.normalize("NFKC")).toHaveLength(512);
+  const { handler, request } = await scenario({ universityName, universityPlace, caption: `${prefix} This is actually Rival University campus.` });
+  const seen = await events(await handler(request({ query: universityName, countryHint: "" })));
+  expect(seen.find(event => event.type === "identity")).toMatchObject({ data: { university: { name: universityName } } });
+  expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+  expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
+});

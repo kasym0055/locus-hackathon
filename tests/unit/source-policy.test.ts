@@ -4,6 +4,18 @@ import { mergePolicy } from "@/server/sources/usage-policy";
 import { publisherFixture, transientPolicy, universityFixture } from "../support/fixtures";
 
 describe("exact-image publisher evidence", () => {
+  it.each(["figure", "gallery", "data-caption", "alt", "title"])("rejects oversized %s evidence rather than binding a truncated prefix", kind => {
+    const caption = "x".repeat(2000) + " This is actually another campus.";
+    const html = kind === "figure" ? `<figure><img src="/x.jpg" alt="Short fallback"><figcaption>${caption}</figcaption></figure>`
+      : kind === "gallery" ? `<div class="gallery-item"><img src="/x.jpg" alt="Short fallback"><p class="caption">${caption}</p></div>`
+      : `<img src="/x.jpg" ${kind}="${caption}">`;
+    expect(bindEvidence(html, "https://example.edu/x.jpg")).toEqual({ excerpt: "", association: "none" });
+  });
+  it("retains the full image-bound caption at the exact evidence limit", () => {
+    const caption = "x".repeat(2000);
+    expect(bindEvidence(`<figure><img src="/x.jpg"><figcaption>${caption}</figcaption></figure>`, "https://example.edu/x.jpg"))
+      .toEqual({ excerpt: caption, association: "explicit" });
+  });
   it("does not treat a university footer as photo attribution", () => {
     const result = bindEvidence('<img src="/x.jpg"><footer>Example University</footer>', "https://example.edu/x.jpg");
     expect(result.association).toBe("none");
