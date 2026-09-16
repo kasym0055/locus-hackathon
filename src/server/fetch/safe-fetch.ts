@@ -109,7 +109,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
   const connect = dependencies.connect ?? buildConnector({ rejectUnauthorized: true, allowH2: false, timeout: 3_000 });
   const counts = new WeakMap<RunContext, { html: number; image: number }>();
   const policy = createAccessPolicy({ contactUrl: dependencies.contactUrl, publisherRules: dependencies.publisherRules,
-    fetchRobots: (url, ctx) => rawFetch(url, "robots", ctx) });
+    fetchRobots: (url, ctx, owner) => rawFetch(url, "robots", ctx, owner) });
 
   async function rawFetch(value: string, kind: FetchKind, ctx: RunContext, owner: RunContext = ctx): Promise<FetchResult> {
     let url = validateUrl(value);
@@ -119,7 +119,11 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
       url = validateUrl(url.href);
       const permission = policy.preflight(url.href);
       if (!permission.allowed) throw new FetchFailure(permission.reason ?? "access_denied", permission.retryAt);
-      if (kind !== "robots") {
+      if (kind === "robots") {
+        // Charge redirected policy origins without recursively checking robots.
+        const allowance = policy.claimOrigin(url.href, owner);
+        if (!allowance.allowed) throw new FetchFailure(allowance.reason ?? "budget_exhausted");
+      } else {
         const access = await policy.checkAccess(url.href, ctx, owner);
         if (!access.allowed) throw new FetchFailure(access.reason ?? "access_denied", access.retryAt);
       }

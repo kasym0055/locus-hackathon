@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { gzipSync } from "node:zlib";
 import { createSafeFetcher, type FetchDependencies } from "@/server/fetch/safe-fetch";
+import { createAccessPolicy } from "@/server/fetch/access-policy";
 import { contextFixture, restrictiveRobots, transportFixture } from "../support/fixtures";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -123,6 +124,43 @@ describe("pinned public-address transport", () => {
 });
 
 describe("publisher access", () => {
+  it("retains pacing for authorized callers and atomically reserves same-timestamp starts", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const policy = createAccessPolicy({ contactUrl: configured.contactUrl, fetchRobots: async (url) => ({
+        finalUrl: url, status: 200, contentType: "text/plain", retrievedAt: "2026-09-16T00:00:00Z",
+        bytes: new TextEncoder().encode("User-agent: *\nCrawl-delay: 0.1\n"),
+      }) });
+      const ctx = contextFixture(5_000);
+      expect(await policy.checkAccess("http://paced.org/a", ctx)).toEqual({ allowed: true });
+      // DNS/socket queuing delays these already-authorized callers beyond the
+      // first eligible start. An unrelated origin must not erase their pacing.
+      clock.mockReturnValue(1_200);
+      expect(await policy.waitForStart("http://unrelated.org/a", ctx)).toEqual({ allowed: true });
+      const burstContext = { ...ctx, deadlineAt: 1_250 };
+      expect(await Promise.all([
+        policy.waitForStart("http://paced.org/a", burstContext),
+        policy.waitForStart("http://paced.org/b", burstContext),
+      ])).toEqual([{ allowed: true }, { allowed: false, reason: "deadline", retryAt: 1_300 }]);
+    } finally { clock.mockRestore(); }
+  });
+  it.each(["sequential", "concurrent"])("charges robots redirect origins to the original eight-origin allowance (%s)", async (mode) => {
+    const client = await setup((request, response) => {
+      const host = request.headers.host!;
+      if (host.startsWith("source-")) {
+        response.writeHead(302, { location: `http://${host.replace("source-", "destination-")}/robots.txt` }); response.end();
+      } else ordinary(request, response);
+    });
+    const ctx = contextFixture();
+    const urls = Array.from({ length: 8 }, (_, index) => `http://source-${index}.org/a`);
+    const results = [];
+    if (mode === "concurrent") results.push(...await Promise.all(urls.map((url) => client.checkAccess(url, ctx))));
+    else for (const url of urls) results.push(await client.checkAccess(url, ctx));
+    const contactedOrigins = new Set(client.requests.map((request) => request.host));
+    expect(contactedOrigins.size).toBeLessThanOrEqual(8);
+    expect(results.some((result) => result.reason === "budget_exhausted")).toBe(true);
+    expect(client.requests.every((request) => request.path === "/robots.txt")).toBe(true);
+  });
   it.each([undefined, "", "https://example.com/contact", "http://localhost/contact"])("disables crawling without a real configured contact URL (%s)", async (contactUrl) => {
     const client = await setup(ordinary, { contactUrl });
     await expect(client.safeFetch("https://publisher.org/a", "html", contextFixture())).rejects.toMatchObject({ code: "access_denied" });

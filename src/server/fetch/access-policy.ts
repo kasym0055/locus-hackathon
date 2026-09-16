@@ -19,12 +19,13 @@ export function crawlerIdentity(contactUrl?: string): string | undefined {
 export function createAccessPolicy(options: {
   contactUrl?: string;
   publisherRules?: ReadonlyMap<string, PublisherRule>;
-  fetchRobots: (url: string, ctx: RunContext) => Promise<FetchResult>;
+  fetchRobots: (url: string, ctx: RunContext, owner: RunContext) => Promise<FetchResult>;
 }) {
   const userAgent = crawlerIdentity(options.contactUrl);
   const states = new WeakMap<RunContext, Map<string, Promise<{ text: string; fetchedAt: number } | AccessResult>>>();
+  const policyOrigins = new WeakMap<RunContext, Set<string>>();
   const blockedUntil = new Map<string, number>();
-  const pacingByOrigin = new Map<string, { readyAt: number; delayMs: number }>();
+  const pacingByOrigin = new Map<string, { readyAt: number; delayMs: number; retainUntil: number }>();
   const denied: AccessResult = { allowed: false, reason: "access_denied" };
 
   function noteResponse(url: string, status: number, retryAfter?: string) {
@@ -41,7 +42,11 @@ export function createAccessPolicy(options: {
   function preflight(url: string): AccessResult {
     if (!userAgent) return denied;
     const origin = new URL(url).origin;
-    for (const [key, expiry] of blockedUntil) if (expiry <= Date.now()) blockedUntil.delete(key);
+    const now = Date.now();
+    for (const [key, expiry] of blockedUntil) if (expiry <= now) blockedUntil.delete(key);
+    // An eligible start time does not mean every authorized caller has started.
+    // Keep the delay until all authorizing run deadlines and reservations expire.
+    for (const [key, pace] of pacingByOrigin) if (pace.readyAt <= now && pace.retainUntil <= now) pacingByOrigin.delete(key);
     const rule = options.publisherRules?.get(origin);
     if (rule?.crawl === "deny" || rule?.policy?.retention === "disallowed") return denied;
     const blocked = blockedUntil.get(origin);
@@ -51,18 +56,31 @@ export function createAccessPolicy(options: {
     return { allowed: true };
   }
 
+  function claimOrigin(url: string, owner: RunContext): AccessResult {
+    const origin = new URL(url).origin;
+    let origins = policyOrigins.get(owner);
+    if (!origins) { origins = new Set(); policyOrigins.set(owner, origins); }
+    if (!origins.has(origin)) {
+      if (origins.size >= 8) return { allowed: false, reason: "budget_exhausted" };
+      // Synchronous check-and-add also covers concurrent policy requests.
+      origins.add(origin);
+    }
+    return { allowed: true };
+  }
+
   async function checkAccess(url: string, ctx: RunContext, owner: RunContext = ctx): Promise<AccessResult> {
     const permission = preflight(url);
     if (!permission.allowed) return permission;
+    const allowance = claimOrigin(url, owner);
+    if (!allowance.allowed) return allowance;
     const target = new URL(url);
     const origin = target.origin;
     let state = states.get(owner);
     if (!state) { state = new Map(); states.set(owner, state); }
     if (!state.has(origin)) {
-      if (state.size >= 8) return { allowed: false, reason: "budget_exhausted" };
       const promise = (async () => {
         try {
-          const response = await options.fetchRobots(`${origin}/robots.txt`, ctx);
+          const response = await options.fetchRobots(`${origin}/robots.txt`, ctx, owner);
           if (response.status === 404) return { text: "", fetchedAt: Date.now() };
           if (response.status !== 200 || !/^text\/plain(?:;|$)/i.test(response.contentType)) return { ...denied, retryAt: blockedUntil.get(origin) };
           const text = new TextDecoder("utf-8", { fatal: true }).decode(response.bytes);
@@ -75,7 +93,7 @@ export function createAccessPolicy(options: {
           return { text, fetchedAt: Date.now() };
         } catch (error) {
           const { code, retryAt } = error as { code?: FailureCode; retryAt?: number };
-          return { allowed: false, reason: code === "unsafe_target" || code === "deadline" || code === "cancelled" ? code : "access_denied", retryAt } satisfies AccessResult;
+          return { allowed: false, reason: code === "unsafe_target" || code === "deadline" || code === "cancelled" || code === "budget_exhausted" ? code : "access_denied", retryAt } satisfies AccessResult;
         }
       })();
       state.set(origin, promise);
@@ -90,7 +108,8 @@ export function createAccessPolicy(options: {
     if (crawlDelay !== undefined && (!Number.isFinite(crawlDelay) || crawlDelay < 0)) return denied;
     const pacing = (crawlDelay ?? 0) * 1_000;
     const readyAt = Math.max(pacingByOrigin.get(origin)?.readyAt ?? 0, result.fetchedAt + pacing);
-    if (pacing > 0) pacingByOrigin.set(origin, { readyAt, delayMs: Math.max(pacing, pacingByOrigin.get(origin)?.delayMs ?? 0) });
+    if (pacing > 0) pacingByOrigin.set(origin, { readyAt, delayMs: Math.max(pacing, pacingByOrigin.get(origin)?.delayMs ?? 0),
+      retainUntil: Math.max(owner.deadlineAt, pacingByOrigin.get(origin)?.retainUntil ?? 0) });
     if (readyAt >= ctx.deadlineAt) return { allowed: false, reason: "deadline", retryAt: readyAt };
     return { allowed: true };
   }
@@ -105,9 +124,14 @@ export function createAccessPolicy(options: {
       const pace = pacingByOrigin.get(origin);
       const now = Date.now();
       if (ctx.signal.aborted) return { allowed: false, reason: ctx.signal.reason?.name === "TimeoutError" ? "deadline" : "cancelled" };
+      if (now >= ctx.deadlineAt) return { allowed: false, reason: "deadline" };
       if (!pace || pace.readyAt <= now) {
-        if (pace) pace.readyAt = now + pace.delayMs;
-        for (const [key, record] of pacingByOrigin) if (key !== origin && record.readyAt <= now) pacingByOrigin.delete(key);
+        // No await between checking and updating the shared record: another
+        // caller at this timestamp observes the reservation before it can start.
+        if (pace) {
+          pace.readyAt = now + pace.delayMs;
+          pace.retainUntil = Math.max(pace.retainUntil, ctx.deadlineAt);
+        }
         return { allowed: true };
       }
       if (pace.readyAt >= ctx.deadlineAt) return { allowed: false, reason: "deadline", retryAt: pace.readyAt };
@@ -115,7 +139,7 @@ export function createAccessPolicy(options: {
       catch { return { allowed: false, reason: ctx.signal.reason?.name === "TimeoutError" ? "deadline" : "cancelled" }; }
     }
   }
-  return { checkAccess, noteResponse, preflight, waitForStart, userAgent };
+  return { checkAccess, noteResponse, preflight, claimOrigin, waitForStart, userAgent };
 }
 
 export async function checkAccess(url: string, ctx: RunContext): Promise<AccessResult> {
