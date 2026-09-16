@@ -38,6 +38,17 @@ export interface University {
   city: string; country: string; officialDomains: string[];
   sources: SourceRef[];
 }
+export interface ProfileQuery {
+  query: string; countryHint: string; selectionToken?: string;
+}
+export type Resolution =
+  | { kind: "resolved"; university: University }
+  | { kind: "needs_selection"; choices: Array<{
+      name: string; campus: string; city: string; country: string;
+      officialDomain: string; source: SourceRef; selectionToken: string;
+    }> }
+  | { kind: "not_found" }
+  | { kind: "unavailable"; code: FailureCode };
 export interface Evidence {
   source: SourceRef; imageId: string; imageUrl: string;
   excerpt: string; association: "explicit" | "gallery" | "mention" | "none";
