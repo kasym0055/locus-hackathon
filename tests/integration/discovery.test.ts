@@ -3,6 +3,7 @@ import { createBraveSearch } from "@/server/discovery/brave";
 import { createWikidataLookup } from "@/server/discovery/wikidata";
 import { createDiscoveryPlanner } from "@/server/discovery/planner";
 import { createLedger } from "@/server/usage/ledger";
+import { createResolver } from "@/server/discovery/resolver";
 import { contextFixture, publisherFixture, universityFixture } from "../support/fixtures";
 
 describe("real adapter HTTP boundaries", () => {
@@ -85,6 +86,26 @@ describe("real adapter HTTP boundaries", () => {
     expect(await lookup("Example University", contextFixture())).toEqual([{ entityId: "Q123", name: "Example University", aliases: ["Example Institute"], website: "https://example.edu/", city: "Example City", country: "Example Country" }]);
     expect(requests.map((url) => url.searchParams.get("action"))).toEqual(["wbsearchentities", "wbgetentities"]);
     expect(requests[0].searchParams.get("limit")).toBe("5");
+  });
+  it.each(["Примерный университет", "Үлгі университеті"])("keeps the Wikidata full label %s through publisher verification", async (localizedName) => {
+    let requests = 0; const inspected: string[] = [];
+    const lookup = createWikidataLookup({ fetch: async (url) => {
+      requests++;
+      return Response.json(new URL(String(url)).searchParams.get("action") === "wbsearchentities"
+        ? { success: 1, search: [{ id: "Q123", label: localizedName }] }
+        : { success: 1, entities: { Q123: { id: "Q123", labels: {
+          en: { value: "Example University" }, ru: { value: "Примерный университет" }, kk: { value: "Үлгі университеті" },
+        }, aliases: {}, descriptions: { en: { value: "university in Example City, Example Country" } }, claims: {
+          P856: [{ rank: "normal", mainsnak: { snaktype: "value", datavalue: { value: "https://example.edu/" } } }],
+        } } } });
+    } });
+    const resolve = createResolver({ lookup, search: async () => [], fetchPage: async (url) => {
+      inspected.push(url); return { ...publisherFixture(`<h1>${localizedName}</h1><address>Example City, Example Country <a href="mailto:info@example.edu">Contact</a></address>`), finalUrl: url };
+    } });
+    const result = await resolve({ query: localizedName, countryHint: "" }, contextFixture());
+    expect(inspected).toEqual(["https://example.edu/"]);
+    expect(result).toMatchObject({ kind: "resolved", university: { name: "Example University", aliases: expect.arrayContaining([localizedName]) } });
+    expect(requests).toBe(2);
   });
 });
 

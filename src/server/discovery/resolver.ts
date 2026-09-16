@@ -20,8 +20,9 @@ const sameHost = (url: string, domain: string) => {
 function source(url: string, policy: UsagePolicy, retrievedAt = new Date().toISOString()): SourceRef {
   return { id: identifier(url), url, policy, retrievedAt };
 }
-function structuredLocation($: CheerioAPI, identity: WikidataIdentity): { city: string; country: string } | undefined {
-  const names = [identity.name, ...identity.aliases].map(normalizeQuery);
+interface PublisherInstitution { name: string; city: string; country: string; website?: string }
+function structuredInstitutions($: CheerioAPI): PublisherInstitution[] {
+  const institutions: PublisherInstitution[] = [];
   for (const element of $("script[type='application/ld+json']").toArray().slice(0, 8)) {
     const raw = $(element).text();
     if (raw.length > 20_000) continue;
@@ -29,15 +30,33 @@ function structuredLocation($: CheerioAPI, identity: WikidataIdentity): { city: 
       const root: unknown = JSON.parse(raw);
       const nodes = Array.isArray(root) ? root : root && typeof root === "object" && "@graph" in root && Array.isArray(root["@graph"]) ? root["@graph"] : [root];
       for (const node of nodes.slice(0, 30)) {
-        if (!node || typeof node !== "object" || typeof node.name !== "string" || !names.includes(normalizeQuery(node.name))) continue;
+        if (!node || typeof node !== "object" || typeof node.name !== "string" || !node.name.trim()) continue;
         const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
         if (!types.some((type: unknown) => ["CollegeOrUniversity", "EducationalOrganization", "University"].includes(String(type)))) continue;
         const address = node.address;
         if (address && typeof address.addressLocality === "string" && typeof address.addressCountry === "string"
-          && address.addressLocality.trim() && address.addressCountry.trim()) return { city: address.addressLocality.trim(), country: address.addressCountry.trim() };
+          && address.addressLocality.trim() && address.addressCountry.trim()) institutions.push({ name: node.name.trim(), city: address.addressLocality.trim(), country: address.addressCountry.trim(),
+            ...(typeof node.url === "string" && httpUrl(node.url) ? { website: node.url } : {}) });
+        if (institutions.length >= 30) return institutions;
       }
     } catch { /* Invalid publisher JSON-LD grants no identity evidence. */ }
   }
+  return institutions;
+}
+function structuredLocation($: CheerioAPI, identity: WikidataIdentity): PublisherInstitution | undefined {
+  const names = [identity.name, ...identity.aliases].map(normalizeQuery);
+  return structuredInstitutions($).find((institution) => names.includes(normalizeQuery(institution.name)));
+}
+function publisherDocument(page: FetchResult): CheerioAPI {
+  const $ = load(new TextDecoder().decode(page.bytes));
+  $("script:not([type='application/ld+json']), style, template, noscript").remove();
+  return $;
+}
+function separatePublisher(a: string, b: string): boolean {
+  // Conservative grouping also excludes sibling subdomains. Shared public suffixes
+  // such as co.uk may withhold a valid pair; they must never manufacture independence.
+  const scope = (value: string) => new URL(value).hostname.split(".").slice(-2).join(".");
+  return scope(a) !== scope(b);
 }
 
 export function createResolver(dependencies: { lookup?: Lookup; search?: Search; fetchPage?: PageFetcher } = {}) {
@@ -56,18 +75,26 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
       }
       const relevant = identities.filter((item) => [item.name, ...item.aliases].some((name) => normalizeQuery(name) === normalized)).slice(0, 5);
       const resolved = new Map<string, University>();
-      const visited = new Set<string>();
-
-      async function verify(identity: WikidataIdentity, url: string, inherited?: UsagePolicy) {
-        if (!httpUrl(url) || visited.size >= 6 || visited.has(url)) return;
-        visited.add(url);
+      const pages = new Map<string, FetchResult | undefined>();
+      async function inspect(url: string): Promise<FetchResult | undefined> {
+        if (pages.has(url)) return pages.get(url);
+        if (!httpUrl(url) || pages.size >= 6) return;
+        pages.set(url, undefined);
         try {
           const page = await fetchPage(url, ctx);
           assertActive(ctx);
+          pages.set(url, page);
+          return page;
+        } catch { assertActive(ctx); failed = true; }
+      }
+
+      async function verify(identity: WikidataIdentity, url: string, inherited?: UsagePolicy, independentSources?: SourceRef[]) {
+        try {
+          const page = await inspect(url);
+          if (!page) return;
           const domain = identity.website ? new URL(identity.website).hostname : new URL(url).hostname;
           if (!sameHost(page.finalUrl, domain)) return;
-          const $ = load(new TextDecoder().decode(page.bytes));
-          $("script:not([type='application/ld+json']), style, template, noscript").remove();
+          const $ = publisherDocument(page);
           const headings = $("title, h1").toArray().map((element) => normalizeQuery($(element).text()));
           const matchingName = [identity.name, ...identity.aliases].some((name) => headings.some((heading) => heading.includes(normalizeQuery(name))));
           const structured = structuredLocation($, identity);
@@ -90,10 +117,45 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
           const publisherPolicy = inherited ? mergePolicy(inherited, publisherIdentityPolicy) : publisherIdentityPolicy;
           resolved.set(identity.entityId, { id: identity.entityId, name: identity.name, aliases: identity.aliases,
             campus: city, city, country, officialDomains: [domain], sources: [
-              source(`https://www.wikidata.org/wiki/${identity.entityId}`, wikidataPolicy),
+              ...(independentSources ?? [source(`https://www.wikidata.org/wiki/${identity.entityId}`, wikidataPolicy)]),
               source(page.finalUrl, publisherPolicy, page.retrievedAt),
             ] });
         } catch { assertActive(ctx); failed = true; }
+      }
+
+      async function recoverFromPublishers(records: DiscoveryRecord[]) {
+        const inspected: Array<{ record: DiscoveryRecord; page: FetchResult; document: CheerioAPI; institutions: PublisherInstitution[] }> = [];
+        for (const record of records.slice(0, 5)) {
+          const page = await inspect(record.pageUrl);
+          if (!page) continue;
+          const document = publisherDocument(page);
+          inspected.push({ record, page, document, institutions: structuredInstitutions(document).filter((item) => normalizeQuery(item.name) === normalized) });
+        }
+        for (const primary of inspected) {
+          for (const institution of primary.institutions) {
+            if (!institution.website || !sameHost(primary.page.finalUrl, new URL(institution.website).hostname)) continue;
+            const domain = new URL(institution.website).hostname;
+            const conflict = inspected.some((other) => separatePublisher(primary.page.finalUrl, other.page.finalUrl)
+              && other.institutions.some((item) => item.website && new URL(item.website).hostname === domain
+                && (normalizeQuery(item.city) !== normalizeQuery(institution.city) || normalizeQuery(item.country) !== normalizeQuery(institution.country))));
+            if (conflict) continue;
+            const corroborating = inspected.find((other) => {
+              if (!separatePublisher(primary.page.finalUrl, other.page.finalUrl)) return false;
+              const matching = other.institutions.some((item) => item.website && new URL(item.website).hostname === domain
+                && normalizeQuery(item.city) === normalizeQuery(institution.city) && normalizeQuery(item.country) === normalizeQuery(institution.country));
+              const visible = other.document("body").clone(); visible.find("script").remove();
+              const text = normalizeQuery(visible.text());
+              const linked = other.document("a[href]").toArray().some((element) => {
+                try { return new URL(other.document(element).attr("href")!, other.page.finalUrl).hostname === domain; } catch { return false; }
+              });
+              return matching && linked && [institution.name, institution.city, institution.country].every((value) => text.includes(normalizeQuery(value)));
+            });
+            if (!corroborating) continue;
+            const independentSource = source(corroborating.page.finalUrl, mergePolicy(corroborating.record.policy, publisherIdentityPolicy), corroborating.page.retrievedAt);
+            await verify({ entityId: `publisher:${identifier(`${domain}|${normalized}|${institution.city}|${institution.country}`)}`,
+              ...institution, aliases: [] }, primary.record.pageUrl, primary.record.policy, [independentSource]);
+          }
+        }
       }
 
       for (const identity of relevant) {
@@ -103,6 +165,7 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
         let records: DiscoveryRecord[] = [];
         try { records = await search({ query: `${query.query} ${query.countryHint} official university contact`, kind: "web" }, ctx); }
         catch { assertActive(ctx); failed = true; }
+        if (!relevant.length) await recoverFromPublishers(records);
         for (const record of records.slice(0, 5)) {
           for (const identity of relevant) {
             if (resolved.has(identity.entityId)) continue;
@@ -111,6 +174,9 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
         }
       }
       const universities = [...resolved.values()];
+      // An unreachable exact-name competitor is still a competing identity.
+      // Never let an outage silently turn an ambiguous query into a unique result.
+      if (relevant.length > 1 && relevant.some((identity) => !resolved.has(identity.entityId))) return { kind: "unavailable", code: "dependency_unavailable" };
       if (universities.length > 1) return { kind: "needs_selection", choices: universities.map((university) => ({
         name: university.name, campus: university.campus, city: university.city, country: university.country,
         officialDomain: university.officialDomains[0], source: university.sources[1],

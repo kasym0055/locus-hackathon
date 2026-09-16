@@ -38,7 +38,10 @@ export function createWikidataLookup(dependencies: { fetch?: typeof fetch } = {}
       // Only an explicit descriptive location is exposed; entity IDs never become invented place names.
       // Missing/other description forms remain unresolved within the two-request bound.
       const location = /^(?:public |private |research |technical |national )*(?:university|institute of technology) in ([^,;]+), ([^,;]+)$/iu.exec(entity.descriptions.en?.value ?? "");
-      return [{ entityId: id, name, aliases: [...new Set(Object.values(entity.aliases).flatMap((items) => items.map((item) => item.value)))],
+      return [{ entityId: id, name, aliases: [...new Set([
+        ...Object.values(entity.labels).map((label) => label.value),
+        ...Object.values(entity.aliases).flatMap((items) => items.map((item) => item.value)),
+      ])].filter((value) => value !== name),
         ...(websites.length === 1 ? { website: websites[0] } : {}), ...(location ? { city: location[1].trim(), country: location[2].trim() } : {}) }];
     });
   };

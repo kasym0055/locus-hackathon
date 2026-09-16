@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalizeQuery, createResolver } from "@/server/discovery/resolver";
-import { contextFixture, publisherFixture } from "../support/fixtures";
+import { contextFixture, publisherFixture, transientPolicy } from "../support/fixtures";
 
 const identity = { entityId: "Q123", name: "Example University", aliases: ["Example Institute"],
   website: "https://example.edu/", city: "Example City", country: "Example Country" };
@@ -57,6 +57,63 @@ describe("conservative institution resolution", () => {
   it("does not trust a redirect outside the independently supplied official domain", async () => {
     const resolve = createResolver({ lookup: async () => [identity], search: async () => [],
       fetchPage: async () => ({ ...publisherFixture(official), finalUrl: "https://unrelated.example/" }) });
+    expect((await resolve({ query: identity.name, countryHint: "" }, contextFixture())).kind).not.toBe("resolved");
+  });
+  it("does not select the surviving exact-name identity when a credible competitor is unavailable", async () => {
+    const inspected: string[] = [];
+    const resolve = createResolver({ lookup: async () => [identity, { ...identity, entityId: "Q456", website: "https://example2.edu/" }], search: async () => [],
+      fetchPage: async (url) => { inspected.push(url); if (url.includes("example2")) throw new Error("publisher offline"); return publisherFixture(official); } });
+    expect(await resolve({ query: identity.name, countryHint: "" }, contextFixture())).toEqual({ kind: "unavailable", code: "dependency_unavailable" });
+    expect(inspected).toEqual(["https://example.edu/", "https://example2.edu/"]);
+  });
+  it.each([false, true])("inspects original Brave pages and requires independent corroboration (present=%s)", async (corroborated) => {
+    const institutionData = JSON.stringify({ "@type": "CollegeOrUniversity", name: identity.name, url: identity.website,
+      address: { addressLocality: identity.city, addressCountry: identity.country } });
+    const inspected: string[] = [];
+    const resolve = createResolver({ lookup: async () => [], search: async () => [
+      { pageUrl: "https://example.edu/", policy: transientPolicy },
+      { pageUrl: "https://independent.example/directory", policy: transientPolicy },
+    ], fetchPage: async (url) => {
+      inspected.push(url);
+      const html = url.includes("independent")
+        ? (corroborated ? `<title>Independent university directory</title><article><h1>Example University</h1><p>Example City, Example Country</p>
+          <a href="https://example.edu/">University website</a><script type="application/ld+json">${institutionData}</script></article>` : "<h1>Unrelated directory</h1>")
+        : `${official}<script type="application/ld+json">${institutionData}</script>`;
+      return { ...publisherFixture(html), finalUrl: url };
+    } });
+    const result = await resolve({ query: identity.name, countryHint: "" }, contextFixture());
+    expect(inspected).toEqual(["https://example.edu/", "https://independent.example/directory"]);
+    if (corroborated) {
+      expect(result.kind).toBe("resolved");
+      if (result.kind !== "resolved") throw new Error("Missing original-source identity");
+      expect(result.university.officialDomains).toEqual(["example.edu"]);
+      expect(result.university.sources.map((item) => item.url)).toEqual(["https://independent.example/directory", "https://example.edu/"]);
+      expect(result.university.sources.every((item) => item.policy.retention === "transient_only")).toBe(true);
+    } else expect(result.kind).not.toBe("resolved");
+  });
+  it("bounds missing-Wikidata publisher inspection and does not promote ranked search URLs", async () => {
+    const inspected: string[] = [];
+    const resolve = createResolver({ lookup: async () => [],
+      search: async () => Array.from({ length: 20 }, (_, index) => ({ pageUrl: `https://result${index}.example/`, policy: transientPolicy })),
+      fetchPage: async (url) => { inspected.push(url); return { ...publisherFixture("<h1>Example University</h1>"), finalUrl: url }; } });
+    expect((await resolve({ query: identity.name, countryHint: "" }, contextFixture())).kind).not.toBe("resolved");
+    expect(inspected).toHaveLength(5);
+  });
+  it.each(["sibling", "no-visible-evidence", "no-official-link", "conflicting-location"])("withholds unsupported publisher corroboration: %s", async (condition) => {
+    const primaryUrl = "https://www.example.edu/";
+    const corroboratingUrl = condition === "sibling" ? "https://news.example.edu/directory" : "https://independent.example/directory";
+    const data = (city: string) => JSON.stringify({ "@type": "CollegeOrUniversity", name: identity.name, url: primaryUrl,
+      address: { addressLocality: city, addressCountry: identity.country } });
+    const urls = [primaryUrl, corroboratingUrl, ...(condition === "conflicting-location" ? ["https://another.example/directory"] : [])];
+    const resolve = createResolver({ lookup: async () => [], search: async () => urls.map((pageUrl) => ({ pageUrl, policy: transientPolicy })),
+      fetchPage: async (url) => {
+        const primary = url === primaryUrl;
+        const city = url.includes("another.example") ? "Different City" : identity.city;
+        const content = primary ? official.replaceAll("example.edu", "www.example.edu") : `<h1>Example University</h1>
+          ${condition === "no-visible-evidence" ? "" : `<p>${city}, Example Country</p>`}
+          ${condition === "no-official-link" ? "" : `<a href="${primaryUrl}">Official website</a>`}`;
+        return { ...publisherFixture(`${content}<script type="application/ld+json">${data(city)}</script>`), finalUrl: url };
+      } });
     expect((await resolve({ query: identity.name, countryHint: "" }, contextFixture())).kind).not.toBe("resolved");
   });
 });
