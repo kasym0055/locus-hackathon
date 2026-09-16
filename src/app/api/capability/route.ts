@@ -1,9 +1,15 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import process from "node:process";
 
+import { after } from "next/server";
 import sharp from "sharp";
 
 import { config } from "@/server/config";
+import {
+  CapabilityStoreFailure,
+  productionCapabilityCancellationStore,
+  type CancellationRecord,
+} from "@/server/capability/cancellation-store";
 import type { ProbeFrameCapture } from "@/server/probe-contract";
 
 export const runtime = "nodejs";
@@ -16,8 +22,6 @@ const SOURCE_PIXELS = SOURCE_WIDTH * SOURCE_HEIGHT;
 const MAX_OUTBOUND_REQUESTS = 6;
 const MAX_OUTBOUND_PER_ORIGIN = 2;
 const encoder = new TextEncoder();
-const cancellationRecords = new Map<string, CancellationRecord>();
-const CANCELLATION_RECORD_TTL_MS = 60_000;
 
 type NativeProbe = NonNullable<ProbeFrameCapture["native"]> & { hash: string; durationMs: number };
 type OutboundProbe = NonNullable<ProbeFrameCapture["outbound"]> & { durationMs: number; aborted: boolean };
@@ -28,7 +32,6 @@ type CancellationEvidence = {
   waitTimersCleared: number;
   outboundAborted: boolean;
 };
-type CancellationRecord = CancellationEvidence & { updatedAt: number };
 type ProbeFrame = {
   event: "capability";
   frame: number;
@@ -47,12 +50,6 @@ function safeEqual(left: string, right: string): boolean {
 
 function validRunId(value: string | null): value is string {
   return value !== null && /^[a-f0-9-]{36}$/i.test(value);
-}
-
-function pruneCancellationRecords(now: number): void {
-  for (const [runId, record] of cancellationRecords) {
-    if (now - record.updatedAt > CANCELLATION_RECORD_TTL_MS) cancellationRecords.delete(runId);
-  }
 }
 
 function waitUntil(startedAt: number, targetMs: number, signal: AbortSignal, onCleared: () => void): Promise<void> {
@@ -142,43 +139,63 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const now = Date.now();
-  pruneCancellationRecords(now);
   const statusRunId = new URL(request.url).searchParams.get("status");
   if (statusRunId !== null) {
     if (!validRunId(statusRunId)) return new Response("Invalid status id", { status: 400 });
-    const record = cancellationRecords.get(statusRunId);
-    return Response.json(record ?? { cancelled: false, cleanupComplete: false, waitTimersCleared: 0, outboundAborted: false }, {
-      headers: { "Cache-Control": "no-store" },
-      status: record ? 200 : 404,
-    });
+    try {
+      const record = await productionCapabilityCancellationStore().read(statusRunId);
+      return Response.json(record ?? { cancelled: false, cleanupComplete: false, waitTimersCleared: 0, outboundAborted: false }, {
+        headers: { "Cache-Control": "no-store", "X-Capability-State-Backend": "redis" },
+        status: record ? 200 : 404,
+      });
+    } catch {
+      return Response.json({ error: "Capability cancellation state is unavailable" }, {
+        headers: { "Cache-Control": "no-store", "X-Capability-State-Backend": "redis" },
+        status: 503,
+      });
+    }
   }
 
   const runId = request.headers.get("x-capability-probe-run-id");
   if (runId !== null && !validRunId(runId)) return new Response("Invalid run id", { status: 400 });
+  let cancellationStore: ReturnType<typeof productionCapabilityCancellationStore> | undefined;
+  if (runId) {
+    try { cancellationStore = productionCapabilityCancellationStore(); }
+    catch { return new Response("Capability cancellation state is unavailable", { status: 503 }); }
+  }
   const startedAt = now;
   const internalAbort = new AbortController();
   let cancellationSource: CancellationEvidence["source"] | undefined;
   let waitTimersCleared = 0;
   let cleanupComplete = false;
   let outboundAborted = false;
-  const updateCancellationRecord = () => {
-    if (!runId || !cancellationSource) return;
-    cancellationRecords.set(runId, {
-      cancelled: internalAbort.signal.aborted,
+  let recordWrites: Promise<void> = Promise.resolve();
+  let finishLifetime!: () => void;
+  let failLifetime!: (error: unknown) => void;
+  const lifetime = new Promise<void>((resolve, reject) => { finishLifetime = resolve; failLifetime = reject; });
+  if (runId) after(lifetime);
+  const updateCancellationRecord = (): Promise<void> => {
+    if (!runId || !cancellationSource || !cancellationStore) return recordWrites;
+    const record: CancellationRecord = {
+      cancelled: true,
       source: cancellationSource,
       cleanupComplete,
       waitTimersCleared,
       outboundAborted,
       updatedAt: Date.now(),
-    });
+    };
+    recordWrites = recordWrites.then(() => cancellationStore.write(runId, record));
+    void recordWrites.catch(() => {});
+    return recordWrites;
   };
-  const cancel = (source: CancellationEvidence["source"]) => {
-    if (internalAbort.signal.aborted) return;
+  const cancel = (source: CancellationEvidence["source"]): Promise<void> => {
+    if (internalAbort.signal.aborted) return lifetime;
     cancellationSource = source;
     internalAbort.abort();
-    updateCancellationRecord();
+    void updateCancellationRecord();
+    return lifetime;
   };
-  request.signal.addEventListener("abort", () => cancel("request"), { once: true });
+  request.signal.addEventListener("abort", () => { void cancel("request"); }, { once: true });
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -201,14 +218,9 @@ export async function GET(request: Request): Promise<Response> {
         (error: unknown) => ({ error }),
       );
       const outbound = runOutboundProbe(internalAbort.signal);
-      void Promise.all([native, outbound]).then(([, outboundResult]) => {
-        outboundAborted = outboundResult.aborted;
-        cleanupComplete = internalAbort.signal.aborted;
-        updateCancellationRecord();
-      });
       const countClearedTimer = () => {
         waitTimersCleared += 1;
-        updateCancellationRecord();
+        void updateCancellationRecord();
       };
 
       try {
@@ -229,11 +241,21 @@ export async function GET(request: Request): Promise<Response> {
         controller.close();
       } catch (error) {
         if (!internalAbort.signal.aborted) controller.error(error);
+      } finally {
+        try {
+          const [, outboundResult] = await Promise.all([native, outbound]);
+          if (internalAbort.signal.aborted) {
+            outboundAborted = outboundResult.aborted;
+            cleanupComplete = true;
+            await updateCancellationRecord();
+          }
+          finishLifetime();
+        } catch (error) {
+          failLifetime(error instanceof CapabilityStoreFailure ? error : new CapabilityStoreFailure());
+        }
       }
     },
-    cancel() {
-      cancel("stream");
-    },
+    cancel: () => cancel("stream"),
   });
 
   return new Response(stream, {
