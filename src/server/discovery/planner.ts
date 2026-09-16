@@ -15,6 +15,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     if (!gaps.length || !university.officialDomains.length) return [];
     const visited = new Set<string>();
     const navigation: string[] = [];
+    const licensedPublisherFiles: string[] = [];
     const officialSupport: Evidence[] = [];
     let fallback: Candidate[] = [];
     let lastFailure: unknown;
@@ -27,8 +28,23 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       try {
         const page = await fetchPage(url, ctx);
         assertActive(ctx);
+        const pageUrl = new URL(page.finalUrl);
+        const $ = load(new TextDecoder().decode(page.bytes));
+        if (pageUrl.origin === "https://commons.wikimedia.org" && /^\/wiki\/Category(?::|%3A)/i.test(pageUrl.pathname)) {
+          for (const element of $('a[href^="/wiki/File:"]').toArray()) {
+            try {
+              const target = new URL($(element).attr("href")!, page.finalUrl); target.hash = "";
+              const title = decodeURIComponent(target.pathname).toLocaleLowerCase("und");
+              if (target.origin !== pageUrl.origin || !/^\/wiki\/File:/i.test(target.pathname)
+                || /(?:emblem|logo|logotype|delegation|gala|conference|presenting|portrait|visitors?['’_%]*_?book)/iu.test(title)
+                || licensedPublisherFiles.includes(target.href)) continue;
+              licensedPublisherFiles.push(target.href);
+              if (licensedPublisherFiles.length === 8) break;
+            } catch { /* invalid publisher navigation is not a candidate */ }
+          }
+          return [];
+        }
         if (official(page.finalUrl)) {
-          const $ = load(new TextDecoder().decode(page.bytes));
           for (const element of $("a[href]").toArray()) {
             const anchor = $(element);
             if (!/campus|gallery|facilit|library|student|общежит|кампус|кітапхана|библиотек/iu.test(`${anchor.text()} ${anchor.attr("href")}`)) continue;
@@ -58,6 +74,12 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     // facilities such as a library or dormitory are not unique enough.
     const objectTerms = [["main atrium", "atrium"], ["main building", "administrative building"], ["clock tower"]];
     const normalized = (value: string) => value.normalize("NFKC").toLocaleLowerCase("und").replace(/\s+/gu, " ").trim();
+    const candidateObject = (candidate: Candidate) => {
+      const primary = candidate.evidence[0];
+      if (!primary || primary.authority !== "attributable" || primary.association !== "explicit") return;
+      const text = normalized(primary.excerpt.split("\n\n")[0]);
+      return objectTerms.find((terms) => terms.some((term) => text.includes(term)));
+    };
     const retainOfficialSupport = (candidates: Candidate[]) => {
       for (const candidate of candidates) for (const evidence of candidate.evidence) {
         if (evidence.authority !== "official" || evidence.association === "none") continue;
@@ -66,9 +88,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     };
     const corroborate = (candidate: Candidate): Candidate => {
       const primary = candidate.evidence[0];
-      if (!primary || primary.authority !== "attributable" || primary.association !== "explicit") return candidate;
-      const text = normalized(primary.excerpt.split("\n\n")[0]);
-      const object = objectTerms.find((terms) => terms.some((term) => text.includes(term)));
+      const object = candidateObject(candidate);
       if (!object) return candidate;
       const support = officialSupport.find((evidence) => {
         try { return new URL(evidence.source.url).origin !== new URL(primary.source.url).origin
@@ -87,7 +107,21 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       if (!fallback.length) fallback = candidates;
       if (officialPass) retainOfficialSupport(candidates);
       return candidates.filter((candidate) => candidate.policy.display === "direct_permitted" && candidate.policy.retention !== "disallowed")
-        .map(corroborate);
+        .map(corroborate).filter((candidate) => candidate.evidence.some((evidence) => evidence.association === "explicit"
+          && (evidence.authority === "official" || evidence.independentEquivalent)));
+    };
+    const findOfficialCorroboration = async (candidates: Candidate[]) => {
+      const object = candidates.map(candidateObject).find((value) => value !== undefined);
+      if (!object) return;
+      const term = [...object].sort((a, b) => a.length - b.length)[0];
+      for (const domain of university.officialDomains.slice(0, 1)) {
+        const query = `site:${domain} "${term}" ${university.name}`.slice(0, 400);
+        const results = await search({ query, kind: "web" }, ctx);
+        for (const result of results.slice(0, 1)) {
+          if (!official(result.pageUrl)) continue;
+          retainOfficialSupport(await inspect(result.pageUrl, result.policy));
+        }
+      }
     };
     for (const domain of university.officialDomains.slice(0, 2)) {
       const candidates = await inspect(`https://${domain}/`, publisherIdentityPolicy);
@@ -108,6 +142,23 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         if (!official(result.pageUrl)) continue;
         const candidates = await inspect(result.pageUrl, result.policy);
         const admitted = eligible(candidates, true);
+        if (admitted.length) return admitted;
+      }
+    }
+    const commons = dependencies.publisherPolicies?.get("https://commons.wikimedia.org");
+    const uploads = dependencies.publisherPolicies?.get("https://upload.wikimedia.org");
+    if (commons?.display === "direct_permitted" && commons.retention !== "disallowed"
+      && uploads?.display === "direct_permitted" && uploads.retention !== "disallowed") {
+      const title = encodeURIComponent(university.name.replace(/\s+/gu, "_"));
+      const licensedPublisherDiscoveryPolicy = { ...publisherIdentityPolicy };
+      await inspect(`https://commons.wikimedia.org/wiki/Category:${title}`, licensedPublisherDiscoveryPolicy);
+      for (const file of licensedPublisherFiles) {
+        const candidates = await inspect(file, licensedPublisherDiscoveryPolicy);
+        let admitted = eligible(candidates);
+        if (!admitted.length) {
+          await findOfficialCorroboration(candidates);
+          admitted = eligible(candidates);
+        }
         if (admitted.length) return admitted;
       }
     }

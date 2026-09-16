@@ -165,7 +165,7 @@ describe("publisher-first discovery", () => {
     ]);
     const searches: string[] = []; let fetches = 0;
     const discover = createDiscoveryPlanner({
-      fetchPage: async (url) => { if (++fetches > 4) throw { code: "budget_exhausted" };
+      fetchPage: async (url) => { if (++fetches > 5) throw { code: "budget_exhausted" };
         return { ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }; },
       search: async (input) => { searches.push(input.kind); return input.kind === "web"
         ? ["campus", "news", "about"].map((page) => ({ pageUrl: `https://example.edu/${page}`, policy: discoveryPolicy }))
@@ -178,12 +178,55 @@ describe("publisher-first discovery", () => {
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
     expect(searches).toEqual(["web", "images"]);
-    expect(fetches).toBe(4);
+    expect(fetches).toBe(5);
     expect(candidate).toMatchObject({ imageUrl: original, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Fixture Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
       corroboration: 20, independentEquivalent: true, corroborationEvidenceIds: [expect.any(String)] });
     expect(candidate.evidence[0].corroborationSources).toEqual([expect.objectContaining({ independent: true,
       locationSupported: true, excerpt: expect.stringContaining("beautiful atrium") })]);
+  });
+  it("crawls a configured licensed publisher category and skips files without independent object corroboration", async () => {
+    const discoveryPolicy = { origin: "brave", policyVersion: "v1", retention: "transient_only" as const,
+      display: "link_only" as const, basis: ["Brave discovery"] };
+    const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "cache_permitted" as const,
+      display: "direct_permitted" as const, basis: ["Documented Wikimedia reuse and direct-display terms"] });
+    const unrelatedOriginal = "https://upload.wikimedia.org/wikipedia/commons/a/aa/Example_University_Astana.jpg";
+    const targetOriginal = "https://upload.wikimedia.org/wikipedia/commons/a/ab/Example_University_atrium.jpg";
+    const filePage = (original: string, description: string, author: string) => `<h1>File page</h1>
+      <div class="fullMedia"><a class="internal" href="${original}">Original file</a></div>
+      <table><tr><td id="fileinfotpl_desc">Description</td><td>${description}</td></tr>
+      <tr><td id="fileinfotpl_aut">Author</td><td>${author}</td></tr></table>
+      <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`;
+    const category = "https://commons.wikimedia.org/wiki/Category:Example_University";
+    const event = "https://commons.wikimedia.org/wiki/File:Example_University_Astana.jpg";
+    const target = "https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg";
+    const corroboration = "https://example.edu/news/atrium";
+    const pages = new Map([
+      ["https://example.edu/", '<a href="/campus">Campus tour</a><main>Example University</main>'],
+      ["https://example.edu/campus", "<main>Campus visitor information.</main>"],
+      [corroboration, '<figure><img src="/news.jpg"><figcaption>Our beautiful main atrium welcomes campus visitors.</figcaption></figure>'],
+      [category, `<div class="gallery"><a href="/wiki/File:Example_University_Astana.jpg">University</a>
+        <a href="/wiki/File:Example_University_atrium.jpg">Atrium</a></div>`],
+      [event, filePage(unrelatedOriginal, "Example University ceremony. Example City, KZ", "Event Photographer")],
+      [target, filePage(targetOriginal, "Example University, main atrium. Example City, KZ", "Campus Photographer")],
+    ]);
+    const searches: string[] = []; const fetched: string[] = [];
+    const discover = createDiscoveryPlanner({
+      fetchPage: async (url) => { fetched.push(url); return { ...publisherFixture(pages.get(url) ?? "<main>No images</main>"), finalUrl: url }; },
+      search: async (input) => { searches.push(`${input.kind}:${input.query}`); return input.kind === "web" && input.query.includes('"atrium"')
+        ? [{ pageUrl: corroboration, policy: discoveryPolicy }] : []; },
+      publisherPolicies: new Map([
+        ["https://commons.wikimedia.org", grant("https://commons.wikimedia.org")],
+        ["https://upload.wikimedia.org", grant("https://upload.wikimedia.org")],
+      ]),
+    });
+    const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
+    expect(searches).toEqual([expect.stringMatching(/^web:site:example\.edu/), 'web:site:example.edu "atrium" Example University']);
+    expect(fetched).toEqual(["https://example.edu/", "https://example.edu/campus", category, event, target, corroboration]);
+    expect(candidate).toMatchObject({ imageUrl: targetOriginal, policy: { display: "direct_permitted", retention: "transient_only",
+      attributionText: "Campus Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
+    expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
+      corroboration: 20, independentEquivalent: true });
   });
 });
