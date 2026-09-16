@@ -4,7 +4,7 @@ Date: 2026-09-16
 
 Project: LOCUS Startup Hackathon 2026, Case 01
 
-Status: Architecture approved in conversation; this formal specification awaits written-spec review.
+Status: Written specification approved with the user's final refinements incorporated. Implementation planning is paused at the user's explicit request.
 
 Scope of this artifact: Product and architecture specification only. Production implementation and an implementation plan are not included.
 
@@ -21,6 +21,8 @@ The user approved the single-application design, evidence-based confidence scori
 1. Keep AI behind a provider/model abstraction. Start with GPT-5.6 Luna; support evaluation-led substitution or selective escalation to GPT-5.6 Terra.
 2. Use Brave primarily for discovery. Follow discovered URLs where possible and verify against original publisher evidence. Do not persist raw Brave Search Results beyond permitted transient processing.
 3. Official university sources always have the highest source priority.
+
+The final review additionally requires explicit image delivery and missing-image behavior, server-validated image bytes for AI, strict provider safe search, respectful and identifiable publisher crawling, early hosting-capability verification, CI/release gates, shared-network-friendly rate limits, and a concrete streaming transport/event contract in the future implementation plan. These refine the approved architecture; this update does not create that plan.
 
 Other accepted constraints:
 
@@ -71,6 +73,19 @@ Use Next.js with Node.js server routes. Native image decoding/resizing and hashi
 
 Hosting candidate: Vercel, with account eligibility checked before deployment. Hobby is limited to personal, non-commercial use; an ineligible project must select a compatible host within the same budget rather than silently rely on that tier. Upstash Free Redis is the proposed shared metadata/counter store. Host-specific details remain outside domain modules. See references R7-R8.
 
+### Early deployment capability verification
+
+The future implementation plan must place a minimal deployed capability check before building the retrieval pipeline around a hosting provider. A local development-server check is insufficient. Confirm on the actual candidate host/account:
+
+- Node.js runtime and supported version, including the safe fetcher's required network controls.
+- Native image-processing package loading, raster decode/resize/hash operations, and binary compatibility in the deployed build.
+- Incremental response delivery without buffering, plus disconnect/cancellation behavior for the selected streaming transport.
+- Configurable function duration sufficient for the 27-second processing window and stream completion, including platform overhead.
+- Available memory and observed peak use under bounded image decoding and the intended concurrent-request load.
+- Outbound connection/concurrency limits, effective per-origin controls, timeouts and abort behavior.
+
+Record the measured capability result and plan/account configuration without secrets. If a required capability fails, adjust the provider or bounded limits before committing the rest of implementation to that hosting assumption. Repeat affected checks after relevant host, runtime, native-library or streaming-configuration changes. This is a required early implementation activity, not a probe performed during specification editing.
+
 No durable job queue is required. A request runs while its response stream is open, stops at its deadline, and produces a terminal result. Nothing essential continues in an untracked background task after the response ends.
 
 ### Module boundaries
@@ -79,10 +94,10 @@ No durable job queue is required. A request runs while its response stream is op
 | --- | --- | --- |
 | Request coordinator | Validate request; own deadline, stage transitions and call allowances | Modules below; clock; budget store |
 | Entity resolver | Produce supported university/campus identities or clarification candidates | Eligible identity cache; Wikidata adapter; discovery adapter; publisher fetcher |
-| Discovery adapter | Find potential pages/images and return transient discovery candidates | Brave Web/Image Search initially |
-| Publisher evidence collector | Fetch original pages and bind text, captions, image references and typed dates | Safe fetcher; HTML parser; source-usage policy |
-| Image processor | Decode, filter and deduplicate a bounded candidate set | Image library; content/perceptual hashes |
-| AI adapter | Return schema-validated visual assessments or supported text claims | Configured provider/model; deadline and cost allowance |
+| Discovery adapter | Apply strongest appropriate safe search; find potential pages/images and return transient discovery candidates | Brave Web/Image Search initially |
+| Publisher evidence collector | Respect access policy; fetch original pages and bind text, captions, image references and typed dates | Identifiable safe fetcher; HTML parser; robots/publisher policy |
+| Image processor | Validate fetched bytes, decode, filter, deduplicate and produce bounded AI image inputs | Safe fetcher; image library; content/perceptual hashes |
+| AI adapter | Consume validated image bytes; return schema-validated visual assessments or supported text claims | Configured provider/model; deadline and cost allowance; no discovered-URL fetching |
 | Verification policy | Compute evidence scores, enforce gates and explain decisions | Entity, publisher evidence and visual assessments |
 | Profile assembler | Build categories, citations, coverage and terminal status | Accepted decisions; supported text facts |
 | Cache/budget service | Enforce retention, expiry, shared spending reservations and rate limits | Redis; versioned policy |
@@ -96,6 +111,12 @@ One profile request accepts a query, an optional explicit country/city hint, a d
 For an unambiguous query, resolution and generation share the same end-to-end request deadline. For an ambiguous query, return candidate names, cities and official-domain evidence promptly. A subsequent selection starts a generation request. Report initial resolution time, generation time and total interaction time separately; do not silently exclude clarification from claims about the user journey.
 
 Stream stage events and only accepted gallery decisions. Stages are resolving, official retrieval, fallback retrieval, checking and assembling. They are operational facts, not fabricated percentages. A terminal event replaces provisional coverage with the final profile state. Cancellation aborts outstanding requests.
+
+### Streaming contract required in the implementation plan
+
+The future implementation plan must select exactly one transport, SSE or streamed NDJSON, and specify its request method, content type, framing and browser consumption. This is deliberately assigned to planning, as requested; this spec update does not select or implement the transport.
+
+That plan must define a versioned event envelope, request correlation, monotonic event ordering, typed payloads and validation rules. It must cover stage progress, resolved identity/clarification, accepted image additions or revisions, warnings, final profile state and fatal failure. Specify how clients handle split network chunks, duplicate/stale events, malformed frames, premature disconnects, cancellation and exactly one terminal outcome. Reconnection must not silently start another paid generation. Event payloads must respect the restricted-data policy and must not expose raw search payloads, image bytes or secrets. The host capability check must exercise the selected transport before the main pipeline depends on it.
 
 Terminal states:
 
@@ -115,8 +136,8 @@ These are interface contracts, not a requirement to persist every record or intr
 | University identity | Internal identity, canonical name, evidenced aliases, campus, city/country, official domains, identity evidence, resolution status |
 | Discovery candidate | Provider, query context, potential page/image URLs, discovery time and restricted-retention lineage; transient by default |
 | Publisher evidence | Source ID, final publisher-page URL, retrieved time, relevant excerpt/caption, image-to-page association, typed source dates, publisher authority and usage policy |
-| Image candidate | Candidate ID, image URL, dimensions, content/perceptual hashes, evidence IDs, facility/location scope and duplicate-group membership |
-| Visual assessment | Image ID, category/tags, visible cues, cited evidence IDs, conflicts, interpretation status, provider/model/prompt/schema versions and usage |
+| Image candidate | Candidate ID, admitted display URL if permitted, validated byte-input reference, dimensions, content/perceptual hashes, evidence IDs, delivery/retention policy, facility/location scope and duplicate-group membership |
+| Visual assessment | Image ID, category/tags, visible cues, safety/relevance flags, cited evidence IDs, conflicts, interpretation status, provider/model/prompt/schema versions and usage |
 | Image decision | Accepted/uncertain/withheld/rejected status, component scores, caps/gates, reasons, source references and supported dates |
 | Profile | Resolved identity, category cards, cited description, coverage, terminal state, warnings, live/cache provenance and timings |
 | Usage record | Request ID, counts, reserved/actual costs, provider/model IDs, stage durations and error codes; no restricted result payloads |
@@ -147,7 +168,15 @@ Use general source parsing and language vocabulary. NU, AITU and KBTU are evalua
 
 The query planner uses full university name, selected city/campus and category vocabulary. It chooses a useful source language instead of executing every language/category combination. Russian and Kazakh aliases and terms are supported even when a provider lacks a corresponding locale parameter; use only supported provider parameters. Preserve spellcheck changes as uncertainty signals rather than silently changing the institution.
 
+Set Brave Web and Image Search `safesearch` explicitly to `strict`; do not depend on endpoint defaults (R3). A replacement provider must use its strongest appropriate supported equivalent. Never relax safe search to fill missing categories. Treat provider offensive-content warnings as reasons to withhold results until content screening clears them, not as permission to display them. Search filtering is one layer: all image paths, including direct official retrieval, must reject unsafe imagery and content unrelated to the selected university, facilities, student life or city. Legitimate city context remains in scope. Unresolved content-safety concerns are withheld from both the main and uncertain galleries.
+
 Brave is discovery evidence, not proof of image membership. Its snippets, ranking, confidence fields and crawl timestamps do not establish publisher attribution or publication dates. The default high-confidence path requires an accessible original publisher page. If that page cannot be inspected and no eligible prior publisher evidence exists, the candidate cannot receive a verified label.
+
+### Publisher access and crawler identity
+
+The shallow crawler checks applicable `robots.txt` rules and publisher access restrictions before retrieving content, including relevant image origins. It honors disallow rules, publisher prohibitions, applicable crawl pacing, access denials, rate-limit responses and Retry-After. It does not bypass login, paywalls, robots restrictions or anti-bot challenges. If access permission cannot be established within the deadline, skip the source and expose the evidence gap; discovery through Brave does not override a publisher restriction.
+
+Publisher page, image and access-policy requests use an identifiable User-Agent containing the application name/version and a real project information/contact URL configured before live crawling. Do not impersonate a browser or omit crawler identity to evade restrictions. Missing crawler identity disables live publisher crawling. Access-policy lookups share the safe fetcher's concurrency, response-size and absolute-time limits; source-required pacing may reduce work further. Honor stricter publisher limits even when the application has unused capacity.
 
 ### Evidence binding
 
@@ -167,11 +196,11 @@ Initial limits per generation request: collect at most 40 candidate records, dow
 
 Before AI:
 
-- Validate content type, decode successfully, limit bytes and decoded pixel count, and reject tiny/icon-like assets.
+- Fetch candidate images only through the server-side safe fetcher. Validate content type against actual bytes, require successful raster decode, bound input bytes and decoded pixels, reject tiny/icon-like assets, and produce bounded normalized image bytes. Reject unsupported/active formats rather than passing them through to a provider.
 - Remove identical content hashes. URL canonicalization may remove known tracking fields, but must preserve resource-changing parameters and signed URLs.
 - Compare perceptual hashes to propose near-duplicate pairs. Confirm using normalized similarity and image geometry before merging; two angles of the same building are not automatically duplicates.
 - Use a bounded crop-aware comparison for probable crop variants. Uncertain comparisons remain separate until a supported decision can be made; do not claim perfect crop detection.
-- Remove explicit stock-provider content, logos, maps, posters and known non-photo renders from the real-photo gallery. Visual AI can flag additional cases later. Lack of a watermark does not establish authenticity.
+- Remove explicit stock-provider content, logos, maps, posters, known non-photo renders, unsafe imagery and unrelated visuals from the real-photo gallery. Use available provider/source safety signals before AI; the bounded visual assessment can flag additional cases before any display. An absent watermark does not prove authenticity, and an absent provider warning does not prove safety.
 
 The initial perceptual candidate threshold is Hamming distance at most 6 for a 64-bit hash; it proposes comparison, not automatic deletion. For ordinary resized/recompressed pairs, initially require aspect ratios within 5% and structural similarity (SSIM) of at least 0.95 after normalization to a common 128-pixel-long-edge grayscale comparison. A bounded center-crop comparison can propose crop variants only when the retained region covers at least 70% of each original; require the same SSIM threshold on matched regions. More aggressive or off-center crops remain a documented limitation. These initial thresholds are versioned and calibrated on rights-permitted fixtures during implementation. Conservative uncertainty is the default until that calibration passes.
 
@@ -179,13 +208,17 @@ Choose the best-supported usable representative, then image quality, within each
 
 ## 8. AI provider/model abstraction and escalation
 
-The domain layer requests either an image assessment or a source-backed text result. Inputs contain typed task data, allowed evidence IDs, image IDs, remaining deadline and cost allowance. Outputs contain a validated domain result, provider/model identity, usage and normalized failure status. Provider-specific SDK objects and error formats stay inside the adapter.
+The domain layer requests either an image assessment or a source-backed text result. Inputs contain typed task data, allowed evidence IDs, image IDs with validated image bytes, remaining deadline and cost allowance. Outputs contain a validated domain result, provider/model identity, usage and normalized failure status. Provider-specific SDK objects and error formats stay inside the adapter.
+
+The image-input path is mandatory: **server-side safe fetch -> content-type/size/decode validation -> bounded image bytes -> AI adapter**. The adapter accepts only validated image payloads carrying an image ID, verified media type, dimensions, byte length and content hash. It must reject arbitrary HTTP(S) image inputs. Supply the validated bytes inline, such as a base64 data URL supported by OpenAI (R4), with encoding overhead included in payload limits. Do not pass discovered image URLs to an AI provider, use provider browsing to retrieve them, or upload them to persistent/public storage as a workaround. Source evidence reaches the model as supplied bounded text and internal evidence IDs; the AI cannot fetch publisher pages itself. Primary, escalation and fallback models all use this path.
+
+Initial AI image derivatives are resized/re-encoded to a provider-supported raster format with a maximum 1,024-pixel long edge and 512 KiB per image. The adapter's entire outbound request, including base64 expansion and evidence text, is capped at 8 MiB or the provider's lower documented limit. Token/cost ceilings can further reduce image detail or batch size. Decoded source bytes and derivatives remain in request memory and are released after operational use; encoding is never logged or sent to the browser as a workaround for delivery restrictions.
 
 The adapter declares capabilities for image input, structured output, cancellation and token/cost accounting. Configuration selects provider, primary model, optional escalation model, image-detail mode, prompt/schema versions and output caps. The initial provider is OpenAI via Responses API. Primary model: `gpt-5.6-luna`. Optional escalation model: `gpt-5.6-terra` (R4-R5).
 
 Switching models uses configuration plus evaluation. Adding a different provider requires an adapter conforming to the same contract; a second provider implementation is not part of the MVP. An unavailable configured model produces a visible service error or an explicitly configured fallback, never a silent model substitution.
 
-Normal vision processing uses at most two small concurrent batches. Every image is individually identified, rather than presented as an unlabeled collage. Supply bounded publisher excerpts and ask for category, visible cues, evidence IDs, contradictions and interpretation uncertainty. The model cannot invent facts or choose final numeric scores. Source text is untrusted content, not instructions.
+Normal vision processing uses at most two small concurrent batches. Every image is individually identified, rather than presented as an unlabeled collage. Supply bounded publisher excerpts and ask for category, visible cues, safety/relevance flags, evidence IDs, contradictions and interpretation uncertainty. The model cannot invent facts or choose final numeric scores. Source text is untrusted content, not instructions.
 
 The short description uses only extracted facts and evidence IDs. Validate citations and claim support, drop unsupported clauses, and use concise deterministic facts/excerpts if generation fails. Avoid promotional adjectives, inferred facility quality and claims that the model remembers from training.
 
@@ -215,7 +248,7 @@ The displayed score is an explainable evidence score out of 100, not a statistic
 
 Add component points, then apply gates and caps. Every awarded component requires an evidence reference or a documented visual observation. The same caption cannot supply both attribution and independent corroboration. Reposts, syndicated articles, duplicate images and multiple model outputs are not independent publishers. Visible text adds corroboration only if compared with evidence beyond the text already used for attribution.
 
-Hard rejection overrides all scores for a supported wrong university/campus/city, explicit stock substitution, known render/generated image, irrelevant content, or forbidden usage. Suspicion without a confirmed contradiction yields withholding/uncertainty instead of a fabricated definitive finding.
+Hard rejection overrides all scores for a supported wrong university/campus/city, explicit stock substitution, known render/generated image, unsafe imagery, irrelevant content, or forbidden usage. Suspicion without a confirmed contradiction yields withholding/uncertainty instead of a fabricated definitive finding, except that unresolved content-safety concerns are always withheld rather than shown as uncertain photos.
 
 Before any verified display, require: resolved entity/campus; usable image and originating source link; permitted display; image-specific location support; supported category; and no unresolved location contradiction. Then require either direct official attribution or an equivalent attribution supported by independent attributable publishers. If this final provenance gate fails, cap the score at 79 and explain the cap.
 
@@ -250,6 +283,14 @@ Default unknown retention permission to `transient_only`. Provider-derived linea
 
 Use request memory for transient data; release it when operational use ends and avoid persistent browser storage. Responses carrying restricted results use `no-store` and bypass framework/CDN response caches. Do not store restricted image data in an automatic image-optimization cache. Configure logs/traces and AI request storage consistently with source policy; where permissible processing cannot be established, skip that path. OpenAI request persistence is disabled where supported; this setting is not a promise that all provider operational retention disappears.
 
+### Image delivery strategy
+
+Image analysis and browser delivery are separate paths. AI always receives server-validated bounded bytes under section 8. For the gallery, prefer direct browser display of an admitted remote image/thumbnail URL when publisher/provider display terms, source access rules and retention requirements permit it. Only expose URLs of screened candidates, not arbitrary discovered URLs. Use a direct image element or equivalent explicitly unoptimized delivery; do not route transient/restricted images through Next.js image optimization, a persistent application proxy, object storage, or a framework/CDN image cache. The MVP does not add an image proxy to overcome hotlink protection.
+
+Do not prefetch/cache restricted images in a service worker, Cache Storage, local storage or IndexedDB. Direct remote requests are governed by the remote server's response headers and the browser; the application cannot promise to override those caches. If required retention/display conditions cannot be met through direct delivery, do not load the image. Persistently caching an eligible image later would require an explicit permitted policy; it is not the default delivery strategy.
+
+If direct display is prohibited, hotlinking is blocked, the URL expires, or loading fails, show the original publisher source link and an explicit **Image unavailable** or **Display not permitted** state. Do not bypass the restriction, silently proxy/cache the image, or substitute a stock/generated image. Remove unavailable images from visible-photo and category-coverage counts, and downgrade the rendered profile's completeness when necessary. A previously computed attribution score describes evidence, not successful current delivery.
+
 Eligible persistent cache defaults:
 
 - Freely reusable/evidenced university identity: seven days, keyed by identity, campus and relevant query context.
@@ -279,14 +320,16 @@ These are design budgets, not benchmark results. Slower earlier stages reduce la
 Initial per-request limits:
 
 - Search: target 6-8 Brave requests, maximum 10 including retries.
-- Publisher pages: maximum 8 fetched pages, maximum 6 concurrent outbound fetches and 2 concurrent requests per publisher host.
+- Publisher pages: maximum 8 fetched content pages, maximum 6 concurrent outbound fetches and 2 concurrent requests per publisher host. Access-policy lookups are separately capped at 8 origin checks, share these concurrency/deadline limits, and can reduce the content-page budget in practice. A new origin that cannot be checked within the allowance is skipped.
 - Individual publisher/image request: approximately 3 seconds, bounded by remaining overall time; maximum 2 MB decoded HTML, 5 MB compressed image and 20 megapixels decoded image.
 - Image candidates: 40 metadata records, 24 downloads and 16 normal vision inputs; primary batches contain at most 8 images each.
 - AI: maximum 2 concurrent calls; primary vision timeout at most 10 seconds; description at most 4 seconds; optional resolver at most 2 seconds. Optional escalation starts only with at least 7 seconds remaining and has at most a 5-second timeout.
 - Global admission: initially at most 3 generation pipelines concurrently; excess requests receive a clear busy response instead of waiting in a queue that defeats the deadline.
-- Abuse control: initially 3 generation requests per minute per client/IP bucket, with sensible handling of shared networks during evaluation.
+- Abuse control: a per-anonymous-session token bucket with capacity 10 and refill rate 20 generation requests per minute, plus at most one active generation per session. A coarse per-IP guard allows up to 120 submitted profile requests per rolling minute. The earlier 3-requests-per-minute-per-IP rule is removed; shared campus/judging networks must not be treated as one user.
 
 The coordinator must reserve source-page capacity for fallback evidence and candidate capacity for different categories. Batch work shares the same request limits; parallelism never multiplies the allowance.
+
+Anonymous session IDs are server-issued and do not require accounts. Session limits improve fairness but are not trusted as cost security: global concurrency, atomic spending reservations and provider-call caps remain authoritative even if clients rotate sessions or IPs. Trust client-IP forwarding only from the deployment platform's configured trusted proxy. Limit rejections provide a retry interval and do not dispatch paid work. The UI prevents accidental duplicate submissions and supports another university search as soon as the previous generation ends. No judge-specific bypass can disable budget or concurrency controls. Test at least 10 successive searches from one session and several separate sessions sharing one IP; tune only with measured behavior while preserving the cost ceilings.
 
 ### Spending controls
 
@@ -324,7 +367,8 @@ Describe only supported campus facts, ideally in two to four short sentences. Ea
 | Brave unavailable or credits exhausted | Try eligible cache/direct official retrieval from a supported identity; report gaps |
 | OpenAI unavailable or output invalid | Use eligible prior assessments or conservative deterministic decisions that independently pass all gates; otherwise withhold |
 | Few usable photos | Return fewer photos with category-specific evidence gaps |
-| Broken image at render time | Preserve source context, mark unavailable and remove it from visible-photo coverage |
+| Blocked hotlinking, forbidden display or broken image at render time | Show publisher source plus explicit missing-image state; no proxy bypass; update visible coverage/completeness |
+| Unsafe content or unresolved safety flag | Reject or withhold from all image galleries; never relax safe search |
 | Deadline reached | Stop new work and finalize accepted material; distinguish partial from insufficient evidence |
 | Budget or concurrency limit reached | Clear unavailable/busy state or eligible cache; no hidden paid bypass |
 | Conflicting sources or models | Explain uncertainty; do not select the answer that produces more photos |
@@ -335,7 +379,7 @@ The AI-outage path does not grant automatic verification from an official URL. A
 
 Keep all provider keys in ignored local environment files and deployment secrets. Commit only variable names and setup instructions when implementation begins. No client-exposed secret variables, logged authorization headers or query-string keys.
 
-The safe fetcher accepts only supported public HTTP(S) targets, validates DNS-resolved addresses and redirects, blocks private/loopback/link-local destinations and unsupported schemes, limits redirects/bytes/time, and sends no ambient user credentials. Bind outbound connections to validated destinations to address DNS rebinding. Parse retrieved HTML as data; never execute publisher scripts. Restrict any image proxy to admitted candidates rather than expose an arbitrary URL proxy.
+The safe fetcher accepts only supported public HTTP(S) targets, validates DNS-resolved addresses and redirects, blocks private/loopback/link-local destinations and unsupported schemes, limits redirects/bytes/time, and sends no ambient user credentials. Bind outbound connections to validated destinations to address DNS rebinding. Apply the publisher-access policy and identifiable User-Agent from section 6. Parse retrieved HTML as data; never execute publisher scripts. The MVP exposes no arbitrary-URL image proxy, and no AI provider may bypass the safe fetcher by retrieving discovered URLs itself.
 
 Bound text passed to AI and enforce schema validation and evidence-ID validation. Do not execute instructions found in captions or pages. Do not ask vision to identify individual students; the task concerns places and categories.
 
@@ -359,6 +403,20 @@ No implementation or performance validation has occurred at spec time. The follo
 - Concurrent spending reservations cannot exceed the configured allowance; timed-out calls are not automatically treated as free.
 - Restricted responses are absent from persistent storage, framework caches, browser storage, logs and test fixtures.
 - Every displayed image and descriptive claim links to its real supporting source.
+- Primary, escalation and fallback AI adapters reject remote image URLs and receive only validated, bounded bytes; malformed media, oversized payloads and private-address redirects never reach them.
+- Strict safe search is explicitly set on provider calls; unsafe or unrelated visuals and unresolved safety flags cannot appear in either image gallery.
+- Robots/publisher prohibitions, access denials, pacing and crawler identity are respected without bypasses; access-policy lookups consume bounded request resources.
+- Restricted images bypass persistent framework/proxy/service-worker caches. Permitted direct delivery works, while blocked or failed delivery produces the source-linked missing-image state and corrected coverage.
+- Successive searches and multiple sessions on one shared IP work within the revised admission policy, while global concurrency and aggregate budgets remain enforced.
+- The future selected streaming protocol handles framing, ordering, cancellation, malformed input and one terminal result without paid automatic replay.
+
+### CI and release verification required in the implementation plan
+
+The future implementation plan must include automated lint, TypeScript typecheck, relevant unit/integration tests, a production build and secret scanning. These are required checks for changes proposed for the release branch and must be rerun against the exact final release commit. Do not treat a passing development server or one successful build as proof that the other gates passed.
+
+Secret scanning covers the working tree, tracked files and relevant Git history, plus generated client/build artifacts, with narrow documented exceptions for demonstrably non-secret fixtures. CI must not print detected secrets, embed credentials into artifacts or require production API keys for ordinary tests. Use mocks and rights-permitted fixtures for routine CI; run credentialed live acceptance checks separately with explicit spending limits.
+
+Release evidence includes the passing check results and commit identifier, the early deployed-capability probe, and the cold/holdout/concurrency acceptance results below. A failed gate blocks release; fix and rerun the affected checks before submitting. This section specifies future plan requirements only: no CI workflow, test implementation, production build or live deployment is created or claimed during this spec update.
 
 ### Live evaluation
 
@@ -388,10 +446,10 @@ The remaining uncertainties are implementation measurements and account/source e
 | Luna accuracy and value of Terra escalation | Reviewed evaluation described above | Escalation stays disabled; maintain uncertainty |
 | Publisher image coverage and reuse basis | Inspect original-source evidence and applicable usage policy | Omit images/categories lacking a valid basis |
 | Persistent storage eligibility | Record applicable provider/source permission | Transient-only; cold-budget assumptions remain valid |
-| Hosting/free-tier eligibility and continuity | Confirm account terms, resource limits and availability through judging | Choose a compatible host within budget before public release |
+| Hosting/free-tier capability, eligibility and continuity | Verify deployed Node/native processing/streaming/duration/memory/outbound concurrency early, plus account terms and availability through judging | Select a compatible host or adjust limits before building around it |
 | 30-second useful-profile rate | Cold/holdout/concurrency measurements | Optimize bounded pipeline or report the limitation honestly |
 
-After the written-spec review, the next Superpowers artifact is an implementation plan. This document does not authorize production coding, purchases, account creation, publishing or deployment.
+The user has approved the written specification with the refinements recorded here and explicitly requested a stop after this update, self-review and presentation of changed sections. Do not create the implementation plan in this step. When planning is subsequently requested, it must choose SSE or streamed NDJSON and define the event schema, place deployed-capability verification early, and include the CI/release gates above. This document does not authorize production coding, purchases, account creation, publishing or deployment.
 
 ## 16. Reference sources
 
@@ -399,7 +457,7 @@ External documentation was checked during the design conversation on 2026-09-16.
 
 - R1: [Brave Search API pricing](https://brave.com/search/api/).
 - R2: [Brave Search API terms](https://api-dashboard.search.brave.com/documentation/resources/terms-of-service).
-- R3: [Brave help, credits and retention guidance](https://api-dashboard.search.brave.com/documentation/resources/help-feedback), and [Image Search reference](https://api-dashboard.search.brave.com/api-reference/images/image_search).
+- R3: [Brave help, credits and retention guidance](https://api-dashboard.search.brave.com/documentation/resources/help-feedback), [Image Search reference](https://api-dashboard.search.brave.com/api-reference/images/image_search), and [Web Search guidance](https://api-dashboard.search.brave.com/app/documentation/web-search).
 - R4: [OpenAI GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna), and [image-input guidance](https://developers.openai.com/api/docs/guides/images-vision).
 - R5: [OpenAI GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra).
 - R6: [Wikidata data access](https://www.wikidata.org/wiki/Wikidata:Data_access), and [structured-data licensing](https://www.wikidata.org/wiki/Wikidata:Licensing).
