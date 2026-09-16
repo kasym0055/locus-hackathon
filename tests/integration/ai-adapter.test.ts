@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { inspect } from "node:util";
 import sharp from "sharp";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AssessmentInput, AssessmentResult, ValidatedImage } from "@/server/contracts";
@@ -57,6 +58,28 @@ it("uses the real SDK with labelled inline bytes, strict schema, no tools or sto
   expect(serialized.indexOf("image-one")).toBeLessThan(serialized.indexOf("data:image/jpeg"));
   expect(requests[0].signal).toBeInstanceOf(AbortSignal);
   expect(reservations[0]).toBeGreaterThan(320); expect(settlements).toEqual([320]);
+});
+it("never logs media bytes or publisher excerpts even with OPENAI_LOG=debug", async () => {
+  const previousLogLevel = process.env.OPENAI_LOG;
+  const logged: unknown[][] = [];
+  const spies = (["debug", "info", "log", "warn", "error"] as const).map((method) =>
+    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => { logged.push(args); }));
+  try {
+    process.env.OPENAI_LOG = "debug";
+    const input = await inputFixture();
+    const publisherExcerpt = "Sensitive authored publisher excerpt for the logging regression.";
+    input.evidence[0].excerpt = publisherExcerpt;
+    const inlineImage = `data:image/jpeg;base64,${Buffer.from(input.images[0].bytes).toString("base64")}`;
+    expect(await adapter().assess(input, contextFixture())).toMatchObject({ ok: true });
+    expect(requests).toHaveLength(1);
+    const captured = inspect(logged, { depth: null, maxStringLength: Infinity });
+    expect({ mediaLogged: captured.includes(inlineImage), publisherLogged: captured.includes(publisherExcerpt), logCalls: logged.length })
+      .toEqual({ mediaLogged: false, publisherLogged: false, logCalls: 0 });
+  } finally {
+    if (previousLogLevel === undefined) delete process.env.OPENAI_LOG;
+    else process.env.OPENAI_LOG = previousLogLevel;
+    for (const spy of spies) spy.mockRestore();
+  }
 });
 it.each(["url", "url-extra", "malformed", "hash", "dimensions", "oversized", "duplicate", "unknown-evidence", "too-many"])("rejects %s input before HTTP or reservation", async (kind) => {
   const input = await inputFixture(); const image = input.images[0];

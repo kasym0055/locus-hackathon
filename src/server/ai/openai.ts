@@ -58,7 +58,7 @@ export function createOpenAiAdapter(config: { model: string; apiKey: string }, d
         assertActive(ctx);
         const timeout = Math.min(10_000, ctx.deadlineAt - Date.now());
         const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(Math.max(1, timeout))]);
-        const client = new OpenAI({ apiKey: config.apiKey, maxRetries: 0, timeout: 10_000 });
+        const client = new OpenAI({ apiKey: config.apiKey, maxRetries: 0, timeout: 10_000, logLevel: "off" });
         const response = await client.responses.create(body, { signal, timeout });
         const usage = usageOf(response.usage);
         if (usage.costMicrousd > reserveCost || usage.outputTokens > maxOutputTokens) throw new AiFailure("invalid_provider_output");
