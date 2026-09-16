@@ -158,3 +158,30 @@ it("withholds permission that expires during assessment before emitting a remote
     expect(seen.at(-1)).toMatchObject({ data: { profile: { warnings: ["policy_unknown"] } } });
   } finally { clock?.mockRestore(); }
 });
+it.each([
+  "Example University campus photographers document Rival University campus in Example City.",
+  "Example University campus ambassadors touring Rival University campus in Example City.",
+  "Example University campus in Example City. Photographers document Rival University campus.",
+])("rejects unsupported continuation of the complete attribution phrase: %s", async caption => {
+  const { handler, request } = await scenario({ caption });
+  const seen = await events(await handler(request()));
+  expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+  expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
+});
+it("admits a complete explicit campus ownership caption", async () => {
+  const { handler, request } = await scenario({ caption: "Example University campus in Example City." });
+  const seen = await events(await handler(request()));
+  expect(seen.find(event => event.type === "image")).toMatchObject({ data: { card: { score: 80, status: "verified" } } });
+});
+it.each(["empty", "missing-final", "credentials", "too-many", "non-array"] as const)("rejects inconsistent or malformed image redirect metadata: %s", async redirectMetadata => {
+  const { fixture, handler, request } = await scenario({ imageRedirect: "roundtrip", imageGrant: true, redirectMetadata });
+  const seen = await events(await handler(request()));
+  expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+  expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence", profile: { warnings: ["policy_unknown"] } } });
+  expect(fixture.stats().providerCalls).toBe(2);
+});
+it("admits an ordered redirect chain ending at the inspected final URL", async () => {
+  const { handler, request } = await scenario({ imageRedirect: "roundtrip", imageGrant: true });
+  const seen = await events(await handler(request()));
+  expect(seen.find(event => event.type === "image")).toMatchObject({ data: { card: { score: 80, displayUrl: "https://example.edu/final.png" } } });
+});

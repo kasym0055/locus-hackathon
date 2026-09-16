@@ -4,6 +4,7 @@ import { createResolver } from "@/server/discovery/resolver";
 import { createDiscoveryPlanner } from "@/server/discovery/planner";
 import { createWikidataLookup } from "@/server/discovery/wikidata";
 import { createBraveSearch } from "@/server/discovery/brave";
+import { httpUrl } from "@/server/discovery/http";
 import { safeFetch } from "@/server/fetch/safe-fetch";
 import { createImagePreparer, ImageFailure } from "@/server/images/prepare";
 import { createOpenAiAdapter } from "@/server/ai/openai";
@@ -43,9 +44,13 @@ export function createProfileServices(options: { ledger: Ledger; apiKey: string;
     const prepared = await createImagePreparer(async (url, kind, context) => {
       requirePermission(url);
       const result = await fetcher(url, kind, context);
-      // A final origin alone cannot attest to unreported intermediate redirects.
-      if (result.finalUrl !== url && !result.redirectUrls) throw new ImageFailure("policy_unknown");
-      for (const destination of [...(result.redirectUrls ?? []), result.finalUrl]) requirePermission(destination);
+      // The observed chain must agree with the inspected resource, including
+      // intermediate origins. Malformed metadata cannot attest to permission.
+      const chain = result.redirectUrls ?? [];
+      const validUrl = (value: unknown): value is string => typeof value === "string" && value.length <= 4096 && httpUrl(value) && new URL(value).href === value;
+      if (!Array.isArray(chain) || chain.length > 3 || !chain.every(validUrl) || !validUrl(result.finalUrl)
+        || (chain.length ? chain.at(-1) !== result.finalUrl : result.finalUrl !== url)) throw new ImageFailure("policy_unknown");
+      for (const destination of [...chain, result.finalUrl]) requirePermission(destination);
       displayUrl = result.finalUrl;
       return result;
     })(candidate, ctx);

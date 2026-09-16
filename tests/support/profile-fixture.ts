@@ -7,7 +7,7 @@ export const fixtureOrigin = "https://app.example";
 export const fixtureSecret = "authored-session-secret-at-least-32-characters";
 export const fixtureGrant = { origin: "https://example.edu", retention: "transient_only" as const, display: "direct_permitted" as const,
   policyVersion: "fixture-v1", basis: ["Authored test publisher grants direct display"], attributionText: "Synthetic Author" };
-export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; grantExpiresAt?: string; onAssessment?: () => void } = {}) {
+export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; grantExpiresAt?: string; onAssessment?: () => void; redirectMetadata?: "empty" | "missing-final" | "credentials" | "too-many" | "non-array" } = {}) {
   const universityName = options.universityName ?? "Example University";
   let released = 0, admitted = 0, providerCalls = 0, abortedAi = false;
   const interpretationContexts: unknown[] = [];
@@ -24,7 +24,17 @@ export async function profileFixture(options: { conflict?: boolean; permit?: boo
     else if (["/campus.png", "/final.png"].includes(request.url ?? "")) { response.writeHead(200, { "content-type": "image/png" }); response.end(raster); }
     else { response.writeHead(200, { "content-type": "text/html" }); response.end(html); }
   });
-  const fetcher = createSafeFetcher({ contactUrl: "https://visual-profile-project.org/contact", resolve: async () => [{ address: "93.184.216.34", family: 4 }], connect: transport.connector }).safeFetch;
+  const safeFetcher = createSafeFetcher({ contactUrl: "https://visual-profile-project.org/contact", resolve: async () => [{ address: "93.184.216.34", family: 4 }], connect: transport.connector }).safeFetch;
+  const fetcher: typeof safeFetcher = async (url, kind, ctx) => {
+    const result = await safeFetcher(url, kind, ctx);
+    if (kind !== "image" || !options.redirectMetadata) return result;
+    // Fault injection at the transport-result boundary; all preceding fetch/media work is real.
+    const metadata: unknown = options.redirectMetadata === "empty" ? []
+      : options.redirectMetadata === "missing-final" ? ["https://third-party.example/intermediate.png"]
+      : options.redirectMetadata === "credentials" ? ["https://user:pass@example.edu/intermediate.png", result.finalUrl]
+      : options.redirectMetadata === "too-many" ? Array(4).fill(result.finalUrl) : result.finalUrl;
+    return { ...result, redirectUrls: metadata as string[] };
+  };
   const providerFetch: typeof fetch = async (url, init) => {
     providerCalls++;
     if (String(url).includes("wikidata.org")) {

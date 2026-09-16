@@ -9,21 +9,21 @@ const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function support(evidence: Evidence, university: University, assessment: Assessment): Evidence {
   // Only the image-bound caption, never unrelated article text, establishes location.
   const caption = normalized(evidence.excerpt.split("\n\n")[0]);
+  // A separately delimited credit is not part of the campus attribution.
+  const attribution = caption.replace(/\. photo: [\p{L}\p{N} .,'’()-]{1,160}$/u, "");
   const locations = [...new Set([university.city, university.campus].map(normalized))];
-  const location = locations.every(value => value && new RegExp(`(?<![\\p{L}\\p{N}])${escaped(value)}(?![\\p{L}\\p{N}])`, "u").test(caption));
-  // A mention of students, a visitor, an author or a partner is not ownership.
-  // M1 accepts only explicit named-campus constructions; ambiguous prose loses
-  // support even when the model claims that the location is supported.
-  const ambiguous = /\b(?:visit\w*|partner\w*|delegation|exchange|guest\w*|joint|shared|not|former|and|or)\b|визит|посещ|партн|гост/iu.test(caption);
-  const name = !ambiguous && [university.name, ...university.aliases].map(normalized)
+  // Match the complete noun phrase. Unsupported continuations cannot turn an
+  // institution-affiliated subject into evidence of depicted-campus ownership.
+  const attributed = [university.name, ...university.aliases].map(normalized)
     .filter(value => value.length >= 3 && value.length <= 200).slice(0, 10).some(value => {
       const owner = escaped(value), place = locations.map(escaped).join("|");
-      return new RegExp(`^(?:the )?(?:${owner}(?:['’]s)?(?:,?\\s+(?:${place}))?\\s+(?:campus|кампус)|(?:campus|кампус) (?:of|at) ${owner})(?=$|[\\s,.])`, "u").test(caption);
+      const match = new RegExp(`^(?:the )?(?:${owner}(?:['’]s)?(?:,?\\s+(${place}))?\\s+(?:campus|кампус)(?: courtyard)?|(?:campus|кампус)(?: courtyard)? (?:of|at) ${owner})(?: (?:in|at) (${place}))?\\.?$`, "u").exec(attribution);
+      return !!match && locations.every(location => location && [match[1], match[2]].includes(location));
     });
   const category = assessment.category === "campus" && /\b(campus|courtyard)\b|кампус/iu.test(caption);
   const direct = evidence.authority === "official" && evidence.association === "explicit";
-  return { ...evidence, locationSupported: direct && name && location, locationScope: "campus", categorySupported: direct && category,
-    officialDirect: direct && name && location };
+  return { ...evidence, locationSupported: direct && attributed, locationScope: "campus", categorySupported: direct && category,
+    officialDirect: direct && attributed };
 }
 export function failureCode(error: unknown, ctx?: RunContext): FailureCode {
   if (ctx && Date.now() >= ctx.deadlineAt) return "deadline";
