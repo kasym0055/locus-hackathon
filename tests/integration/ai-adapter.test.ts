@@ -210,3 +210,18 @@ it.each(["negative", "overflow", "output-cap", "incomplete", "refusal", "wrong-m
   expect(await adapter().assess(await inputFixture(), contextFixture())).toMatchObject({ ok: false, code: "invalid_provider_output" });
   expect(settlements).toHaveLength(1);
 });
+it("supplies bounded resolved identity as comparison context, separately from publisher evidence", async () => {
+  const input = await inputFixture();
+  Object.assign(input, { selectedUniversity: { name: "Example University", campus: "Main", city: "Example City", country: "Example Country" } });
+  expect(await adapter().assess(input, contextFixture())).toMatchObject({ ok: true });
+  const content = (requests[0].body.input as Array<{ content: Array<{ text: string }> }>)[0].content;
+  expect(JSON.parse(content[0].text)).toMatchObject({ selectedUniversityForComparison: { name: "Example University", campus: "Main", city: "Example City", country: "Example Country" }, untrustedPublisherEvidence: [{ id: "attribution-source" }] });
+});
+it.each([
+  { name: "x".repeat(201), campus: "Main", city: "Example City", country: "Example Country" },
+  { name: "Example University", campus: "Main", city: "Example City", country: "Example Country", score: 100 },
+])("rejects invalid resolved identity context before provider work", async selectedUniversity => {
+  const input = await inputFixture(); Object.assign(input, { selectedUniversity });
+  expect(await adapter().assess(input, contextFixture())).toMatchObject({ ok: false, code: "invalid_request" });
+  expect(requests).toHaveLength(0);
+});

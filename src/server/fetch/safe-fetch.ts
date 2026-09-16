@@ -113,6 +113,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
 
   async function rawFetch(value: string, kind: FetchKind, ctx: RunContext, owner: RunContext = ctx): Promise<FetchResult> {
     let url = validateUrl(value);
+    const redirectUrls: string[] = [];
     if (!policy.userAgent) throw new FetchFailure("access_denied");
     for (let redirects = 0; ; redirects++) {
       assertActive(ctx);
@@ -161,6 +162,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
         if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
           if (redirects >= 3 || !header("location")) throw new FetchFailure("protocol_error");
           url = validateUrl(new URL(header("location"), url).href);
+          redirectUrls.push(url.href);
           continue;
         }
         if (kind !== "robots" && (response.statusCode < 200 || response.statusCode >= 300 || header("retry-after"))) throw new FetchFailure("access_denied", policy.preflight(url.href).retryAt);
@@ -176,7 +178,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
             .map((element) => $(element).attr("content") ?? "").join(",");
           if (/(?:^|[\s,])(?:none|noai|noimageai|noimageindex)(?:$|[\s,])/i.test(restrictions)) throw new FetchFailure("access_denied");
         }
-        return { finalUrl: url.href, contentType, bytes, status: response.statusCode, retrievedAt: new Date().toISOString() };
+        return { finalUrl: url.href, redirectUrls, contentType, bytes, status: response.statusCode, retrievedAt: new Date().toISOString() };
       } finally {
         body?.destroy();
         try { await dispatcher.destroy(); } finally { release(); }

@@ -11,12 +11,15 @@ export function assertActive(ctx: RunContext) {
   if (Date.now() >= ctx.deadlineAt) throw new AiFailure("deadline");
 }
 const evidenceSchema = z.array(z.strictObject({ id: internalId, imageId: internalId, excerpt: z.string().min(1).max(1200) })).max(48);
+const identityText = z.string().trim().min(1).max(200).refine(value => !/(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:data|javascript|file):|\bwww\.)/i.test(value));
+const selectedUniversitySchema = z.strictObject({ name: identityText, campus: identityText, city: identityText, country: identityText });
 const imageKeys = new Set(["id", "bytes", "mediaType", "width", "height", "byteLength", "originalSha256", "sha256"]);
 export async function validateInput(input: AssessmentInput): Promise<AssessmentInput> {
   try {
-    if (!input || Object.keys(input).some((key) => !["images", "evidence"].includes(key)) || !Array.isArray(input.images)
+    if (!input || Object.keys(input).some((key) => !["images", "evidence", "selectedUniversity"].includes(key)) || !Array.isArray(input.images)
       || !input.images.length || input.images.length > 16) throw new Error();
     const evidence = evidenceSchema.parse(input.evidence);
+    const selectedUniversity = input.selectedUniversity === undefined ? undefined : selectedUniversitySchema.parse(input.selectedUniversity);
     const ids = new Set(input.images.map((image) => image?.id));
     if (ids.size !== input.images.length || new Set(evidence.map(({ id }) => id)).size !== evidence.length
       || evidence.some(({ imageId }) => !ids.has(imageId))) throw new Error();
@@ -27,7 +30,7 @@ export async function validateInput(input: AssessmentInput): Promise<AssessmentI
       return { ...image, bytes: Buffer.from(image.bytes) };
     });
     for (const image of images) await validateImage(image);
-    return { images, evidence: evidence.map((item) => ({ ...item,
+    return { images, ...(selectedUniversity ? { selectedUniversity } : {}), evidence: evidence.map((item) => ({ ...item,
       excerpt: item.excerpt.replace(/(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\b(?:data|javascript|file):|(?<!:)\/\/)[^\s<>"']+/gi, "[link omitted]") })) };
   } catch { throw new AiFailure("invalid_request"); }
 }

@@ -5,11 +5,13 @@ import { createDiscoveryPlanner } from "@/server/discovery/planner";
 import { createWikidataLookup } from "@/server/discovery/wikidata";
 import { createBraveSearch } from "@/server/discovery/brave";
 import { safeFetch } from "@/server/fetch/safe-fetch";
-import { createImagePreparer } from "@/server/images/prepare";
+import { createImagePreparer, ImageFailure } from "@/server/images/prepare";
 import { createOpenAiAdapter } from "@/server/ai/openai";
 import type { UsagePolicy } from "@/server/contracts";
 import { policySchema } from "@/lib/event-schema";
 import { z } from "zod";
+import { documentedPolicyFor, mergePolicy } from "@/server/sources/usage-policy";
+import type { Candidate, RunContext } from "@/server/contracts";
 
 // Operator-owned documentation only. No query or request can supply grants.
 export function readPublisherPolicies(raw: string | undefined): ReadonlyMap<string, UsagePolicy> {
@@ -30,10 +32,30 @@ export function createProfileServices(options: { ledger: Ledger; apiKey: string;
   const fetcher = options.fetcher ?? safeFetch;
   const search = createBraveSearch({ apiKey: options.braveKey, ledger: options.ledger, fetch: options.providerFetch });
   const fetchPage = (url: string, ctx: Parameters<typeof safeFetch>[2]) => fetcher(url, "html", ctx);
+  const prepare = async (candidate: Candidate, ctx: RunContext) => {
+    let policy = candidate.policy, displayUrl = candidate.imageUrl;
+    const checked = new Set<string>();
+    const requirePermission = (url: string) => {
+      const grant = documentedPolicyFor(url, options.policies);
+      if (!grant || grant.display !== "direct_permitted" || grant.retention === "disallowed") throw new ImageFailure("policy_unknown");
+      if (!checked.has(grant.origin)) { policy = mergePolicy(policy, grant); checked.add(grant.origin); }
+    };
+    const prepared = await createImagePreparer(async (url, kind, context) => {
+      requirePermission(url);
+      const result = await fetcher(url, kind, context);
+      // A final origin alone cannot attest to unreported intermediate redirects.
+      if (result.finalUrl !== url && !result.redirectUrls) throw new ImageFailure("policy_unknown");
+      for (const destination of [...(result.redirectUrls ?? []), result.finalUrl]) requirePermission(destination);
+      displayUrl = result.finalUrl;
+      return result;
+    })(candidate, ctx);
+    return { ...prepared, candidate: { ...candidate, imageUrl: displayUrl, policy,
+      evidence: candidate.evidence.map(evidence => ({ ...evidence, source: { ...evidence.source, policy } })) } };
+  };
   return { ledger: options.ledger,
     resolve: createResolver({ lookup: createWikidataLookup({ fetch: options.providerFetch }), search, fetchPage }),
     discover: createDiscoveryPlanner({ search, fetchPage, publisherPolicies: options.policies }),
-    prepare: createImagePreparer(fetcher), ai: createOpenAiAdapter({ apiKey: options.apiKey, model: options.model }, { ledger: options.ledger }) };
+    prepare, ai: createOpenAiAdapter({ apiKey: options.apiKey, model: options.model }, { ledger: options.ledger }) };
 }
 export type ProfileServices = ReturnType<typeof createProfileServices>;
 export async function productionServices(): Promise<ProfileServices> {

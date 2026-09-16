@@ -5,11 +5,21 @@ import { decide } from "@/server/policy/decide";
 import { assembleProfile } from "./assemble";
 import { productionServices, type ProfileServices } from "./services";
 const normalized = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function support(evidence: Evidence, university: University, assessment: Assessment): Evidence {
   // Only the image-bound caption, never unrelated article text, establishes location.
   const caption = normalized(evidence.excerpt.split("\n\n")[0]);
-  const name = [university.name, ...university.aliases].some(value => caption.includes(normalized(value)));
-  const location = caption.includes(normalized(university.city)) && caption.includes(normalized(university.campus));
+  const locations = [...new Set([university.city, university.campus].map(normalized))];
+  const location = locations.every(value => value && new RegExp(`(?<![\\p{L}\\p{N}])${escaped(value)}(?![\\p{L}\\p{N}])`, "u").test(caption));
+  // A mention of students, a visitor, an author or a partner is not ownership.
+  // M1 accepts only explicit named-campus constructions; ambiguous prose loses
+  // support even when the model claims that the location is supported.
+  const ambiguous = /\b(?:visit\w*|partner\w*|delegation|exchange|guest\w*|joint|shared|not|former|and|or)\b|визит|посещ|партн|гост/iu.test(caption);
+  const name = !ambiguous && [university.name, ...university.aliases].map(normalized)
+    .filter(value => value.length >= 3 && value.length <= 200).slice(0, 10).some(value => {
+      const owner = escaped(value), place = locations.map(escaped).join("|");
+      return new RegExp(`^(?:the )?(?:${owner}(?:['’]s)?(?:,?\\s+(?:${place}))?\\s+(?:campus|кампус)|(?:campus|кампус) (?:of|at) ${owner})(?=$|[\\s,.])`, "u").test(caption);
+    });
   const category = assessment.category === "campus" && /\b(campus|courtyard)\b|кампус/iu.test(caption);
   const direct = evidence.authority === "official" && evidence.association === "explicit";
   return { ...evidence, locationSupported: direct && name && location, locationScope: "campus", categorySupported: direct && category,
@@ -49,15 +59,19 @@ export function createProfileRunner(services: ProfileServices) {
       university = resolution.university; emit({ type: "identity", data: { university } });
       emit({ type: "stage", data: { stage: "discovering" } });
       const candidates = await services.discover(university, ["campus"], ctx); active();
-      const candidate = candidates[0];
+      let candidate = candidates[0];
       if (candidate && candidate.policy.display === "direct_permitted" && candidate.policy.retention !== "disallowed") {
         emit({ type: "stage", data: { stage: "preparing" } });
         const prepared = await services.prepare(candidate, ctx); active();
+        candidate = prepared.candidate;
         emit({ type: "stage", data: { stage: "assessing" } });
         await services.ledger.check(ctx); active();
-        const result = await services.ai.assess({ images: [prepared.image], evidence: candidate.evidence.map(e => ({ id: e.source.id, imageId: e.imageId, excerpt: e.excerpt.slice(0, 1200) })) }, ctx);
+        const result = await services.ai.assess({ images: [prepared.image], selectedUniversity: {
+          name: university.name, campus: university.campus, city: university.city, country: university.country,
+        }, evidence: candidate.evidence.map(e => ({ id: e.source.id, imageId: e.imageId, excerpt: e.excerpt.slice(0, 1200) })) }, ctx);
         active();
         if (!result.ok) throw { code: result.code };
+        if (candidate.policy.expiresAt && Date.parse(candidate.policy.expiresAt) <= Date.now()) throw { code: "policy_unknown" };
         const assessment = result.assessments.find(item => item.imageId === candidate.id);
         if (assessment) {
           for (const evidence of candidate.evidence) {

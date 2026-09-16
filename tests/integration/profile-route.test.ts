@@ -26,6 +26,7 @@ it("streams a real pipeline through external fixtures to a source-linked score-8
   expect(seen.at(-1)).toMatchObject({ type: "final", data: { state: "partial", profile: { description: [] } } });
   expect(JSON.stringify(seen)).not.toMatch(/untrustedPublisherEvidence|base64|excerpt|"bytes"|thumbnail/);
   expect(fixture.stats()).toMatchObject({ admitted: 1, released: 1, providerCalls: 3 });
+  expect(fixture.interpretationContexts).toEqual([{ name: "Example University", campus: "Example City", city: "Example City", country: "Example Country" }]);
   expect(fixture.contexts[0].deadlineAt - fixture.contexts[0].startedAt).toBe(27000);
 });
 it("rejects the changed photo location without inventing a fallback", async () => {
@@ -110,4 +111,50 @@ it("rejects content types that only start with the JSON media type", async () =>
   const { fixture, handler, request } = await scenario();
   expect((await handler(request(undefined, { "content-type": "application/json-not-valid" }))).status).toBe(400);
   expect(fixture.stats().admitted).toBe(0);
+});
+it.each([
+  { crossOrigin: true }, { imageRedirect: "external" as const }, { imageRedirect: "roundtrip" as const },
+])("withholds image without a grant for every observed image origin: %j", async options => {
+  const { fixture, handler, request } = await scenario(options);
+  const seen = await events(await handler(request()));
+  expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+  expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
+  expect(fixture.stats().providerCalls).toBe(2);
+});
+it.each([
+  "Example University students visiting Partner University campus in Example City.",
+  "Partner University campus in Example City, photographed by Example University students.",
+  "Example University and Partner University campus in Example City.",
+])("withholds visitor, partner or ambiguous ownership despite a positive AI assessment: %s", async caption => {
+  const { handler, request } = await scenario({ caption });
+  const seen = await events(await handler(request()));
+  expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+  expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
+});
+it.each([
+  [{ crossOrigin: true, imageGrant: true }, "https://third-party.example/campus.png"],
+  [{ imageRedirect: "external" as const, imageGrant: true }, "https://third-party.example/campus.png"],
+  [{ imageRedirect: "roundtrip" as const, imageGrant: true }, "https://example.edu/final.png"],
+] as const)("keeps explicitly permitted image origins and their attribution: %j", async (options, displayUrl) => {
+  const { handler, request } = await scenario(options);
+  const seen = await events(await handler(request()));
+  const card = seen.find(event => event.type === "image");
+  expect(card).toMatchObject({ data: { card: { score: 80, displayUrl, source: { policy: { attributionText: expect.stringContaining("Synthetic image host") } } } } });
+});
+it("treats punctuation in an explicit institution name as literal attribution", async () => {
+  const universityName = "Example (Arts) University";
+  const { handler, request } = await scenario({ universityName });
+  const seen = await events(await handler(request({ query: universityName, countryHint: "" })));
+  expect(seen.find(event => event.type === "image")).toMatchObject({ data: { card: { score: 80 } } });
+});
+it("withholds permission that expires during assessment before emitting a remote card", async () => {
+  const startedAt = Date.now(); let clock: ReturnType<typeof vi.spyOn> | undefined;
+  try {
+    const { fixture, handler, request } = await scenario({ grantExpiresAt: new Date(startedAt + 1000).toISOString(),
+      onAssessment: () => { clock = vi.spyOn(Date, "now").mockReturnValue(startedAt + 2000); } });
+    const seen = await events(await handler(request()));
+    expect(fixture.stats().providerCalls).toBe(3);
+    expect(seen.filter(event => event.type === "image")).toHaveLength(0);
+    expect(seen.at(-1)).toMatchObject({ data: { profile: { warnings: ["policy_unknown"] } } });
+  } finally { clock?.mockRestore(); }
 });

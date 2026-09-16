@@ -2,6 +2,7 @@ import { load } from "cheerio";
 import type { Candidate, Category, RunContext, University, UsagePolicy } from "@/server/contracts";
 import { safeFetch } from "@/server/fetch/safe-fetch";
 import { extractCandidates } from "@/server/sources/publisher";
+import { documentedPolicyFor, mergePolicy } from "@/server/sources/usage-policy";
 import { searchBrave, type Search } from "./brave";
 import { assertActive, httpUrl } from "./http";
 import { publisherIdentityPolicy, type PageFetcher } from "./resolver";
@@ -41,7 +42,14 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         return extractCandidates(page, university, inherited, grant).filter((candidate) =>
           (!expectedImage || candidate.imageUrl === expectedImage) && !/\.(svg|gif)(?:\?|$)/i.test(candidate.imageUrl)
           && candidate.evidence.some((evidence) => evidence.association !== "none" && !evidence.forbidden))
-          .slice(0, 40).map((candidate) => ({ ...candidate, categoryHint: gaps[0] }));
+          .slice(0, 40).map((candidate) => {
+            const imageGrant = documentedPolicyFor(candidate.imageUrl, dependencies.publisherPolicies);
+            const imagePolicy = imageGrant ?? { ...candidate.policy, display: "link_only" as const,
+              basis: ["Image origin display permission not established"] };
+            const policy = mergePolicy(candidate.policy, imagePolicy);
+            return { ...candidate, policy, categoryHint: gaps[0], evidence: candidate.evidence.map(evidence =>
+              ({ ...evidence, source: { ...evidence.source, policy } })) };
+          });
       } catch (error) { assertActive(ctx); lastFailure = error; return []; }
     }
     for (const domain of university.officialDomains.slice(0, 2)) {

@@ -1,4 +1,10 @@
 import type { UsagePolicy } from "@/server/contracts";
+export function documentedPolicyFor(url: string, policies?: ReadonlyMap<string, UsagePolicy>): UsagePolicy | undefined {
+  const origin = new URL(url).origin;
+  const grant = policies?.get(origin);
+  return grant?.origin === origin && grant.basis.some(basis => basis.trim())
+    && (!grant.expiresAt || Date.parse(grant.expiresAt) > Date.now()) ? grant : undefined;
+}
 export function mergePolicy(a: UsagePolicy, b: UsagePolicy): UsagePolicy {
   const rank = { cache_permitted: 0, transient_only: 1, disallowed: 2 };
   const retention = rank[a.retention] >= rank[b.retention] ? a.retention : b.retention;

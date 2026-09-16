@@ -71,6 +71,8 @@ export interface Candidate {
 export interface FetchResult {
   finalUrl: string; contentType: string; bytes: Uint8Array;
   retrievedAt: string; status: number;
+  // Observed redirect destinations, in order; request-local transport metadata.
+  redirectUrls?: string[];
 }
 
 // Bytes never enter persistent storage or a browser response. These are request-scoped.
@@ -96,6 +98,7 @@ export interface Decision {
 export interface AssessmentInput {
   images: ValidatedImage[];
   evidence: Array<{ id: string; imageId: string; excerpt: string }>;
+  selectedUniversity?: Pick<University, "name" | "campus" | "city" | "country">;
 }
 export interface AiUsage { inputTokens: number; outputTokens: number; costMicrousd: number }
 export type AssessmentResult = { ok: true; assessments: Assessment[]; provider: "openai"; model: string; usage: AiUsage }
