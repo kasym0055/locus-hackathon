@@ -73,6 +73,34 @@ describe("exact-image publisher evidence", () => {
     const page = publisherFixture('<div><p>These photographs show Partner University, not Example University.</p><figure><img src="/visit.jpg"><figcaption>Library visit</figcaption></figure></div><footer>Example University</footer>');
     expect(extractCandidates(page, universityFixture(), transientPolicy)[0].evidence[0].excerpt).toContain("not Example University");
   });
+  it("binds a Wikimedia file's exact image, author and Creative Commons license", () => {
+    const page = { ...publisherFixture(`
+      <h1>File:Example University atrium.jpg</h1>
+      <div class="fullMedia"><a class="internal" href="https://upload.wikimedia.org/wikipedia/commons/a/ab/Example_University_atrium.jpg">Original file</a></div>
+      <table><tr><td id="fileinfotpl_desc">Description</td><td class="description">Example University, main atrium. Example City, KZ</td></tr>
+      <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer</td></tr></table>
+      <span class="licensetpl_short">CC BY-SA 4.0</span>
+      <span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`),
+      finalUrl: "https://commons.wikimedia.org/wiki/File:Example_University_atrium.jpg" };
+    const grant = { ...transientPolicy, origin: "https://commons.wikimedia.org", retention: "cache_permitted" as const,
+      display: "direct_permitted" as const, attributionText: "Read the file page for attribution" };
+    const candidates = extractCandidates(page, universityFixture(), transientPolicy, grant);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ imageUrl: "https://upload.wikimedia.org/wikipedia/commons/a/ab/Example_University_atrium.jpg",
+      policy: { display: "direct_permitted", retention: "transient_only", attributionText: "Fixture Photographer — CC BY-SA 4.0",
+        licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
+    expect(candidates[0].evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
+      excerpt: expect.stringContaining("Example University, main atrium. Example City, KZ") });
+  });
+  it("does not apply a Wikimedia origin grant when file-level attribution is incomplete", () => {
+    const page = { ...publisherFixture(`<h1>File:Unknown.jpg</h1><div class="fullMedia"><a class="internal" href="https://upload.wikimedia.org/x.jpg">Original file</a></div>
+      <table><tr><td id="fileinfotpl_desc">Description</td><td>Example University campus</td></tr></table>`),
+      finalUrl: "https://commons.wikimedia.org/wiki/File:Unknown.jpg" };
+    const grant = { ...transientPolicy, origin: "https://commons.wikimedia.org", display: "direct_permitted" as const };
+    expect(extractCandidates(page, universityFixture(), transientPolicy, grant)[0]).toMatchObject({
+      policy: { display: "link_only" }, evidence: [{ authority: "unknown" }],
+    });
+  });
 });
 describe("derived usage policy", () => {
   it("preserves discovery restrictions after following the source", () => {

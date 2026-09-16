@@ -7,7 +7,7 @@ import { productionServices, type ProfileServices } from "./services";
 import { LeaseReleaseFailure, releaseLease } from "./release";
 const normalized = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function support(evidence: Evidence, university: University, assessment: Assessment): Evidence {
+export function supportEvidence(evidence: Evidence, university: University, assessment: Assessment): Evidence {
   // Only the image-bound caption, never unrelated article text, establishes location.
   const caption = normalized(evidence.excerpt.split("\n\n")[0]);
   const locations = [...new Set([university.city, university.campus].map(normalized))];
@@ -19,10 +19,16 @@ function support(evidence: Evidence, university: University, assessment: Assessm
       const match = new RegExp(`^(?:the )?(?:${owner}(?:['’]s)?(?:,?\\s+(${place}))?\\s+(?:campus|кампус)(?: courtyard)?|(?:campus|кампус)(?: courtyard)? (?:of|at) ${owner})(?: (?:in|at) (${place}))?\\.?$`, "u").exec(caption);
       return !!match && locations.every(location => location && [match[1], match[2]].includes(location));
     });
-  const category = assessment.category === "campus" && /\b(campus|courtyard)\b|кампус/iu.test(caption);
+  const category = assessment.category === "campus" && /\b(campus|courtyard|atrium|main building|clock tower)\b|кампус/iu.test(caption);
   const direct = evidence.authority === "official" && evidence.association === "explicit";
-  return { ...evidence, locationSupported: direct && attributed, locationScope: "campus", categorySupported: direct && category,
-    officialDirect: direct && attributed };
+  const identity = [university.name, ...university.aliases].map(normalized).filter(value => value.length >= 3)
+    .some(value => new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped(value)}(?:$|[^\\p{L}\\p{N}])`, "u").test(caption));
+  const city = normalized(university.city);
+  const independentlyAttributed = evidence.authority === "attributable" && evidence.association === "explicit"
+    && evidence.independentEquivalent && evidence.corroboration === 20 && identity && Boolean(city) && caption.includes(city)
+    && category && (evidence.corroborationSources ?? []).some((source) => source.locationSupported && source.independent);
+  return { ...evidence, locationSupported: (direct && attributed) || independentlyAttributed, locationScope: "campus",
+    categorySupported: category && ((direct && attributed) || independentlyAttributed), officialDirect: direct && attributed };
 }
 export function failureCode(error: unknown, ctx?: RunContext): FailureCode {
   if (ctx && Date.now() >= ctx.deadlineAt) return "deadline";
@@ -74,7 +80,7 @@ export function createProfileRunner(services: ProfileServices) {
         const assessment = result.assessments.find(item => item.imageId === candidate.id);
         if (assessment) {
           for (const evidence of candidate.evidence) {
-            const decision = decide({ resolved: true, usable: true, evidence: support(evidence, university, assessment), assessment });
+            const decision = decide({ resolved: true, usable: true, evidence: supportEvidence(evidence, university, assessment), assessment });
             if (decision.status === "verified" && assessment.category) {
               const card: ImageCardData = { id: candidate.id, revision: 1, category: assessment.category, tags: [], status: decision.status, score: decision.score,
                 components: decision.components, reasons: decision.reasons, source: evidence.source, displayUrl: candidate.imageUrl, delivery: "remote" };

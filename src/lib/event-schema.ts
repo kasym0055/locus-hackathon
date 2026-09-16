@@ -7,7 +7,7 @@ export const urlSchema = z.string().max(4096).url().refine(value => {
 const text = z.string().max(2000); const id = z.string().min(1).max(160);
 export const policySchema = z.strictObject({ retention: z.enum(["transient_only", "cache_permitted", "disallowed"]), origin: text,
   policyVersion: text, basis: z.array(text).max(20), expiresAt: z.iso.datetime().optional(),
-  display: z.enum(["direct_permitted", "link_only", "disallowed"]), attributionText: text.optional() });
+  display: z.enum(["direct_permitted", "link_only", "disallowed"]), attributionText: text.optional(), licenseUrl: urlSchema.optional() });
 export const sourceSchema = z.strictObject({ id, url: urlSchema, retrievedAt: z.iso.datetime(), publishedAt: text.optional(), capturedAt: text.optional(), dateBasis: text.optional(), policy: policySchema });
 const universitySchema = z.strictObject({ id, name: text, aliases: z.array(text).max(50), campus: text, city: text, country: text,
   officialDomains: z.array(z.string().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i)).max(10), sources: z.array(sourceSchema).max(20) });

@@ -14,5 +14,6 @@ export function mergePolicy(a: UsagePolicy, b: UsagePolicy): UsagePolicy {
   const expiry = [a.expiresAt, b.expiresAt].filter((x): x is string => Boolean(x)).sort()[0];
   return { retention, display, origin: `${a.origin}+${b.origin}`,
     policyVersion: "v1", basis: [...a.basis, ...b.basis], expiresAt: expiry,
-    attributionText: [a.attributionText, b.attributionText].filter(Boolean).join("; ") || undefined };
+    attributionText: [a.attributionText, b.attributionText].filter(Boolean).join("; ") || undefined,
+    licenseUrl: a.licenseUrl && b.licenseUrl && a.licenseUrl !== b.licenseUrl ? undefined : a.licenseUrl ?? b.licenseUrl };
 }

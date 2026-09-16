@@ -6,7 +6,8 @@ import { transportFixture } from "./fixtures";
 export const fixtureOrigin = "https://app.example";
 export const fixtureSecret = "authored-session-secret-at-least-32-characters";
 export const fixtureGrant = { origin: "https://example.edu", retention: "transient_only" as const, display: "direct_permitted" as const,
-  policyVersion: "fixture-v1", basis: ["Authored test publisher grants direct display"], attributionText: "Synthetic Author" };
+  policyVersion: "fixture-v1", basis: ["Authored test publisher grants direct display"], attributionText: "Synthetic Author",
+  licenseUrl: "https://licenses.example/synthetic" };
 export async function profileFixture(options: { conflict?: boolean; permit?: boolean; busy?: boolean; hangAi?: boolean; oversizedIdentity?: boolean; oversizedWire?: boolean; crossOrigin?: boolean; imageRedirect?: "external" | "roundtrip"; imageGrant?: boolean; caption?: string; universityName?: string; universityPlace?: string; grantExpiresAt?: string; onAssessment?: () => void; release?: () => Promise<void>; redirectMetadata?: "empty" | "missing-final" | "credentials" | "too-many" | "non-array" } = {}) {
   const universityName = options.universityName ?? "Example University";
   const universityPlace = options.universityPlace ?? "Example City";

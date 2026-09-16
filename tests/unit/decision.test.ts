@@ -1,6 +1,8 @@
 import { expect, it } from "vitest";
 import { decide } from "@/server/policy/decide";
+import { supportEvidence } from "@/server/profile/run-profile";
 import { decisionFixture } from "../support/fixtures";
+import { universityFixture } from "../support/fixtures";
 
 const strong = () => decisionFixture({ authority: "official", association: "explicit", corroboration: 20, visual: 10 });
 it.each([
@@ -88,4 +90,15 @@ it.each(["unsafe", "irrelevant", "forbidden", "disallowed", "wrong-image", "miss
   if (["unsafe", "irrelevant", "forbidden", "disallowed"].includes(kind)) expect(result.status).toBe("rejected");
   else expect(result.status).not.toBe("verified");
   if (kind === "no-observation") expect(result.components.visual).toBe(0);
+});
+it("verifies a licensed attributable atrium only when independent official object evidence is retained", () => {
+  const input = decisionFixture({ authority: "attributable", association: "explicit", corroboration: 20, visual: 10 });
+  input.evidence.excerpt = "Example University, main atrium. Example City, KZ";
+  input.evidence.corroborationSources![0].excerpt = "The official university campus tour identifies our beautiful main atrium.";
+  input.assessment.category = "campus";
+  input.assessment.observations = ["The photograph shows a large university atrium."];
+  const evidence = supportEvidence(input.evidence, universityFixture(), input.assessment);
+  expect(evidence).toMatchObject({ locationSupported: true, categorySupported: true, officialDirect: false,
+    independentEquivalent: true });
+  expect(decide({ ...input, evidence })).toMatchObject({ status: "verified", score: 90 });
 });

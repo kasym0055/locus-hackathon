@@ -27,6 +27,7 @@ export interface UsagePolicy {
   basis: string[]; expiresAt?: string;
   display: "direct_permitted" | "link_only" | "disallowed";
   attributionText?: string;
+  licenseUrl?: string;
 }
 export interface SourceRef {
   id: string; url: string; retrievedAt: string;

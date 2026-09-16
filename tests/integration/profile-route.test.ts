@@ -129,7 +129,7 @@ it.each([
   const seen = await events(await handler(request()));
   expect(seen.filter(event => event.type === "image")).toHaveLength(0);
   expect(seen.at(-1)).toMatchObject({ data: { state: "insufficient_evidence" } });
-  expect(fixture.stats().providerCalls).toBe(2);
+  expect(fixture.stats().providerCalls).toBe(options.crossOrigin ? 3 : 2);
 });
 it.each([
   "Example University students visiting Partner University campus in Example City.",

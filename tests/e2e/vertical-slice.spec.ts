@@ -10,6 +10,7 @@ test("fixture pipeline displays a loaded image, source, score and partial final 
   await expect(photo).toBeVisible();
   await expect.poll(() => photo.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
   await expect(page.getByRole("link", { name: "Publisher source", exact: true })).toHaveAttribute("href", "https://example.edu/");
+  await expect(page.getByRole("link", { name: "License", exact: true })).toHaveAttribute("href", "https://licenses.example/synthetic");
   await expect(page.getByText("80/100 — verified", { exact: false })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Partial profile");
 });
