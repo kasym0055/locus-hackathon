@@ -4,6 +4,7 @@ import process from "node:process";
 import sharp from "sharp";
 
 import { config } from "@/server/config";
+import type { ProbeFrameCapture } from "@/server/probe-contract";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,19 +13,30 @@ export const maxDuration = 60;
 const SOURCE_WIDTH = 5_000;
 const SOURCE_HEIGHT = 4_000;
 const SOURCE_PIXELS = SOURCE_WIDTH * SOURCE_HEIGHT;
-const FRAME_AT_MS = [0, 1_000, 28_000] as const;
 const MAX_OUTBOUND_REQUESTS = 6;
 const MAX_OUTBOUND_PER_ORIGIN = 2;
 const encoder = new TextEncoder();
+const cancellationRecords = new Map<string, CancellationRecord>();
+const CANCELLATION_RECORD_TTL_MS = 60_000;
 
+type NativeProbe = NonNullable<ProbeFrameCapture["native"]> & { hash: string; durationMs: number };
+type OutboundProbe = NonNullable<ProbeFrameCapture["outbound"]> & { durationMs: number; aborted: boolean };
+type CancellationEvidence = {
+  cancelled: boolean;
+  source: "request" | "stream";
+  cleanupComplete: boolean;
+  waitTimersCleared: number;
+  outboundAborted: boolean;
+};
+type CancellationRecord = CancellationEvidence & { updatedAt: number };
 type ProbeFrame = {
   event: "capability";
   frame: number;
   elapsedMs: number;
   rssBytes: number;
   memoryLimitBytes: number;
-  native?: { hash: string; durationMs: number; decodes: number; sourcePixels: number };
-  outbound?: { configured: boolean; attempts: number; succeeded: number; durationMs: number };
+  native?: NativeProbe;
+  outbound?: OutboundProbe;
 };
 
 function safeEqual(left: string, right: string): boolean {
@@ -33,7 +45,17 @@ function safeEqual(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function waitUntil(startedAt: number, targetMs: number, signal: AbortSignal): Promise<void> {
+function validRunId(value: string | null): value is string {
+  return value !== null && /^[a-f0-9-]{36}$/i.test(value);
+}
+
+function pruneCancellationRecords(now: number): void {
+  for (const [runId, record] of cancellationRecords) {
+    if (now - record.updatedAt > CANCELLATION_RECORD_TTL_MS) cancellationRecords.delete(runId);
+  }
+}
+
+function waitUntil(startedAt: number, targetMs: number, signal: AbortSignal, onCleared: () => void): Promise<void> {
   const remaining = Math.max(0, targetMs - (Date.now() - startedAt));
   if (signal.aborted || remaining === 0) return Promise.resolve();
 
@@ -43,52 +65,73 @@ function waitUntil(startedAt: number, targetMs: number, signal: AbortSignal): Pr
     function cleanup() {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
+      onCleared();
       resolve();
     }
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-async function runNativeProbe(): Promise<NonNullable<ProbeFrame["native"]>> {
+async function runNativeProbe(sampleRss: () => void): Promise<NativeProbe> {
   const startedAt = Date.now();
+  sampleRss();
   const raster = await sharp({
     create: { width: SOURCE_WIDTH, height: SOURCE_HEIGHT, channels: 3, background: "#2450a4" },
   }).png().toBuffer();
+  sampleRss();
   const decoded = await Promise.all(
-    Array.from({ length: 2 }, () => sharp(raster).resize({ width: 1_600 }).raw().toBuffer()),
+    Array.from({ length: 2 }, async () => {
+      const output = await sharp(raster).resize({ width: 1_600 }).raw().toBuffer();
+      sampleRss();
+      return output;
+    }),
   );
+  sampleRss();
   const hash = createHash("sha256").update(decoded[0]).digest("hex");
 
-  return { hash, durationMs: Date.now() - startedAt, decodes: decoded.length, sourcePixels: SOURCE_PIXELS };
+  return { hash, durationMs: Date.now() - startedAt, decodes: decoded.length, sourcePixels: SOURCE_PIXELS, peakRssBytes: 0, rssSamples: 0 };
 }
 
-async function runOutboundProbe(requestSignal: AbortSignal): Promise<NonNullable<ProbeFrame["outbound"]>> {
+async function runOutboundProbe(signal: AbortSignal): Promise<OutboundProbe> {
   const endpoint = config.capabilityProbe.endpoint;
-  if (!endpoint) return { configured: false, attempts: 0, succeeded: 0, durationMs: 0 };
+  if (!endpoint) return { configured: false, attempts: 0, succeeded: 0, failed: 0, maxActive: 0, maxActivePerOrigin: 0, durationMs: 0, aborted: signal.aborted };
 
   const startedAt = Date.now();
   let cursor = 0;
+  let attempts = 0;
   let succeeded = 0;
+  let failed = 0;
+  let active = 0;
+  let maxActive = 0;
+  let maxActivePerOrigin = 0;
+  let aborted = signal.aborted;
   const jobs = Array.from({ length: MAX_OUTBOUND_REQUESTS }, () => async () => {
-    const response = await fetch(endpoint, {
-      method: "HEAD",
-      signal: AbortSignal.any([requestSignal, AbortSignal.timeout(5_000)]),
-    });
-    if (response.ok) succeeded += 1;
+    if (signal.aborted) return;
+    attempts += 1;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    maxActivePerOrigin = Math.max(maxActivePerOrigin, active);
+    try {
+      const response = await fetch(endpoint, { method: "HEAD", signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]) });
+      if (response.ok) succeeded += 1;
+      else failed += 1;
+      await response.body?.cancel();
+    } catch {
+      failed += 1;
+      aborted ||= signal.aborted;
+    } finally {
+      active -= 1;
+    }
   });
   const workers = Array.from({ length: MAX_OUTBOUND_PER_ORIGIN }, async () => {
-    while (cursor < jobs.length && !requestSignal.aborted) {
+    while (cursor < jobs.length && !signal.aborted) {
       const job = jobs[cursor++];
-      try {
-        await job();
-      } catch {
-        // Probe reports aggregate timing and counts only.
-      }
+      await job();
     }
   });
   await Promise.all(workers);
 
-  return { configured: true, attempts: MAX_OUTBOUND_REQUESTS, succeeded, durationMs: Date.now() - startedAt };
+  return { configured: true, attempts, succeeded, failed, maxActive, maxActivePerOrigin, durationMs: Date.now() - startedAt, aborted };
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -98,14 +141,53 @@ export async function GET(request: Request): Promise<Response> {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  const startedAt = Date.now();
-  let cancelled = false;
+  const now = Date.now();
+  pruneCancellationRecords(now);
+  const statusRunId = new URL(request.url).searchParams.get("status");
+  if (statusRunId !== null) {
+    if (!validRunId(statusRunId)) return new Response("Invalid status id", { status: 400 });
+    const record = cancellationRecords.get(statusRunId);
+    return Response.json(record ?? { cancelled: false, cleanupComplete: false, waitTimersCleared: 0, outboundAborted: false }, {
+      headers: { "Cache-Control": "no-store" },
+      status: record ? 200 : 404,
+    });
+  }
+
+  const runId = request.headers.get("x-capability-probe-run-id");
+  if (runId !== null && !validRunId(runId)) return new Response("Invalid run id", { status: 400 });
+  const startedAt = now;
+  const internalAbort = new AbortController();
+  let cancellationSource: CancellationEvidence["source"] | undefined;
+  let waitTimersCleared = 0;
+  let cleanupComplete = false;
+  let outboundAborted = false;
+  const updateCancellationRecord = () => {
+    if (!runId || !cancellationSource) return;
+    cancellationRecords.set(runId, {
+      cancelled: internalAbort.signal.aborted,
+      source: cancellationSource,
+      cleanupComplete,
+      waitTimersCleared,
+      outboundAborted,
+      updatedAt: Date.now(),
+    });
+  };
+  const cancel = (source: CancellationEvidence["source"]) => {
+    if (internalAbort.signal.aborted) return;
+    cancellationSource = source;
+    internalAbort.abort();
+    updateCancellationRecord();
+  };
+  request.signal.addEventListener("abort", () => cancel("request"), { once: true });
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (frame: number, details: Omit<ProbeFrame, "event" | "frame" | "elapsedMs" | "rssBytes" | "memoryLimitBytes"> = {}) => {
-        if (cancelled || request.signal.aborted) return;
+      const rssSamples: number[] = [];
+      const sampleRss = () => rssSamples.push(process.memoryUsage().rss);
+      const send = (frame: ProbeFrame["frame"], event: ProbeFrame["event"], details: Omit<ProbeFrame, "event" | "frame" | "elapsedMs" | "rssBytes" | "memoryLimitBytes"> = {}) => {
+        if (internalAbort.signal.aborted) return;
         const frameData: ProbeFrame = {
-          event: "capability",
+          event,
           frame,
           elapsedMs: Date.now() - startedAt,
           rssBytes: process.memoryUsage().rss,
@@ -114,27 +196,46 @@ export async function GET(request: Request): Promise<Response> {
         };
         controller.enqueue(encoder.encode(`${JSON.stringify(frameData)}\n`));
       };
-      const native = runNativeProbe();
-      const outbound = runOutboundProbe(request.signal);
+      const native = runNativeProbe(sampleRss).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      const outbound = runOutboundProbe(internalAbort.signal);
+      void Promise.all([native, outbound]).then(([, outboundResult]) => {
+        outboundAborted = outboundResult.aborted;
+        cleanupComplete = internalAbort.signal.aborted;
+        updateCancellationRecord();
+      });
+      const countClearedTimer = () => {
+        waitTimersCleared += 1;
+        updateCancellationRecord();
+      };
 
       try {
-        send(0);
-        await waitUntil(startedAt, FRAME_AT_MS[1], request.signal);
-        send(1);
-        const [nativeResult, outboundResult] = await Promise.all([native, outbound]);
-        await waitUntil(startedAt, FRAME_AT_MS[2], request.signal);
-        send(28, { native: nativeResult, outbound: outboundResult });
-        if (!cancelled && !request.signal.aborted) controller.close();
+        send(0, "capability");
+        await waitUntil(startedAt, 1_000, internalAbort.signal, countClearedTimer);
+        if (internalAbort.signal.aborted) return;
+        send(1, "capability");
+        const [nativeOutcome, outboundResult] = await Promise.all([native, outbound]);
+        if ("error" in nativeOutcome) throw nativeOutcome.error;
+        await waitUntil(startedAt, 28_000, internalAbort.signal, countClearedTimer);
+        if (internalAbort.signal.aborted) return;
+        const nativeResult: NativeProbe = {
+          ...nativeOutcome.value,
+          peakRssBytes: Math.max(...rssSamples),
+          rssSamples: rssSamples.length,
+        };
+        send(28, "capability", { native: nativeResult, outbound: outboundResult });
+        controller.close();
       } catch (error) {
-        if (!cancelled && !request.signal.aborted) controller.error(error);
+        if (!internalAbort.signal.aborted) controller.error(error);
       }
     },
     cancel() {
-      cancelled = true;
+      cancel("stream");
     },
   });
 
-  request.signal.addEventListener("abort", () => { cancelled = true; }, { once: true });
   return new Response(stream, {
     headers: { "Cache-Control": "no-store", "Content-Type": "application/x-ndjson; charset=utf-8" },
   });
