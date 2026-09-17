@@ -225,3 +225,43 @@ patch. After pushing, stop for operator Production promotion. Only after the
 diagnostic commit is Production may the next single NU acceptance request run;
 capture its matching events before the Hobby log-retention window expires.
 M1 remains open. Task 6 must not start.
+
+## Bounded official corroboration fallback (2026-09-17)
+
+The operator supplied a Production `publisher_access_denied` event for request
+`7ccb1755-40cb-45cc-a36a-4d38841e5433`: phase `official_corroboration`, kind `html`,
+hop zero, source `robots_policy`, no retry time, elapsed 5,998 ms. This identifies
+the access-policy gate on the first corroboration target, not publisher-budget
+exhaustion. It does not establish which underlying robots condition denied access.
+
+The planner now considers at most two distinct unvisited official page candidates
+per object, in search-result order, using the same search query and safe-fetch
+path. Non-official results do not consume those two slots. A denied page or a
+page without object support can fall through to the next candidate. Valid
+independent corroboration stops the loop immediately. Request-local object
+tracking prevents another licensed file for the same object from restarting its
+search or two-candidate allowance. Exhausting that allowance grants no evidence.
+
+Only planner selection changes. The eight-page visitation bound, twelve raw HTML
+dispatch limit, licensed-file ceiling and corroboration reservation, redirect
+enforcement, robots/access policy, SSRF, provider budgets, 27-second deadline,
+publisher/license rules, and deterministic verification remain unchanged.
+
+Synthetic socket-backed regressions exercise a real robots denial followed by
+permitted corroboration, irrelevant-first fallback, both-denied and both-irrelevant
+results, immediate first-source success, skipped external/lookalike domains, and
+no third official candidate even across repeated files for the same object. One
+case consumes all twelve permitted HTML dispatches and rejects attempt 13.
+
+Verification: 152 focused tests passed; the full suite passed 327 tests with eight
+existing Redis-dependent tests skipped. Typecheck, lint, production build, and
+diff checks passed. The first full-suite run hit the previously observed Windows
+worker exit `3221226505` in profile-route without an assertion failure; a complete
+rerun passed. No runner or application setting was changed to obtain that pass.
+
+After this commit is pushed, stop for Production promotion. No NU request was
+issued while implementing this change. After promotion, verify `x-locus-commit`,
+run exactly one fresh NU request, and capture the matching runtime logs promptly.
+Both incidents can close only when the live request reaches preparing, assessing,
+and a real OpenAI call. Later-stage failures must be investigated separately.
+M1 remains open; Task 6 must not start.

@@ -115,16 +115,24 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         .map(corroborate).filter((candidate) => candidate.evidence.some((evidence) => evidence.association === "explicit"
           && (evidence.authority === "official" || evidence.independentEquivalent)));
     };
+    // A later file depicting the same object must not restart its search/allowance.
+    const searchedObjects = new Set<string[]>();
     const findOfficialCorroboration = async (candidates: Candidate[]) => {
       const object = candidates.map(candidateObject).find((value) => value !== undefined);
-      if (!object) return;
+      if (!object || searchedObjects.has(object)) return;
+      searchedObjects.add(object);
       const term = [...object].sort((a, b) => a.length - b.length)[0];
       for (const domain of university.officialDomains.slice(0, 1)) {
         const query = `site:${domain} "${term}" ${university.name}`.slice(0, 400);
         const results = await search({ query, kind: "web" }, ctx);
-        for (const result of results.slice(0, 1)) {
-          if (!official(result.pageUrl)) continue;
+        let attempts = 0;
+        for (const result of results) {
+          if (attempts >= 2) break;
+          if (!httpUrl(result.pageUrl) || !official(result.pageUrl) || visited.has(result.pageUrl)) continue;
+          attempts++;
           retainOfficialSupport(await inspect(result.pageUrl, result.policy, undefined, "official_corroboration"));
+          if (candidates.some(candidate => candidateObject(candidate) === object
+            && corroborate(candidate).evidence[0]?.independentEquivalent)) return;
         }
       }
     };

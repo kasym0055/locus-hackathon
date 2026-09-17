@@ -238,6 +238,82 @@ describe("publisher-first discovery", () => {
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
       corroboration: 20, independentEquivalent: true });
   });
+  it.each(["denied-first", "irrelevant-first", "both-denied", "both-irrelevant", "first-supports"] as const)(
+    "bounds official corroboration to two permitted-domain candidates: %s", async mode => {
+      const filePath = "/wiki/File:Campus_atrium.jpg";
+      const original = "https://upload.wikimedia.org/commons/atrium.jpg";
+      const officialAttempts: string[] = [], searches: string[] = [];
+      const transport = await transportFixture((request, response) => {
+        if (request.url === "/robots.txt") {
+          response.writeHead(200, { "content-type": "text/plain" });
+          response.end(request.headers.host === "example.edu"
+            ? `User-agent: *\n${mode === "denied-first" || mode === "both-denied" ? "Disallow: /first\n" : ""}${mode === "both-denied" ? "Disallow: /second\n" : ""}`
+            : "User-agent: *\nAllow: /\n"); return;
+        }
+        response.writeHead(200, { "content-type": "text/html" });
+        if (request.url?.startsWith("/wiki/Category:")) {
+          response.end(`<a href="${filePath}">Atrium</a><a href="/wiki/File:Other_atrium.jpg">Another atrium</a>`);
+        } else if (request.url?.startsWith("/wiki/File:")) {
+          response.end(`<div class="fullMedia"><a class="internal" href="${original}">Original</a></div>
+            <table><tr><td id="fileinfotpl_desc">Description</td><td>Example University, main atrium. Example City, KZ</td></tr>
+            <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer</td></tr></table>
+            <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`);
+        } else {
+          const supports = mode !== "both-irrelevant" && (request.url !== "/first" || mode === "first-supports");
+          response.end(`<figure><img src="/photo.jpg"><figcaption>${supports ? "Our main atrium welcomes visitors." : "Our sports field welcomes visitors."}</figcaption></figure>`);
+        }
+      });
+      try {
+        const safeFetch = createSafeFetcher({ contactUrl: "https://visual-profile-project.org/contact",
+          resolve: async () => [{ address: "93.184.216.34", family: 4 }], connect: transport.connector }).safeFetch;
+        const ctx = contextFixture();
+        // One case leaves exactly four dispatches for category, file and two official pages.
+        for (let index = 0; index < (mode === "irrelevant-first" ? 8 : 2); index++) await safeFetch(`https://identity.edu/${index}`, "html", ctx);
+        const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "transient_only" as const,
+          display: "direct_permitted" as const, basis: ["Documented publisher reuse terms"] });
+        const discover = createDiscoveryPlanner({
+          fetchPage: (url, context) => {
+            if (context.publisherPhase === "official_corroboration") officialAttempts.push(url);
+            return safeFetch(url, "html", context);
+          },
+          search: async input => {
+            if (input.kind !== "web") return [];
+            searches.push(input.query);
+            return ["https://example.edu/first", "https://outsider.org/first", "https://example.edu.attacker.org/second",
+              "https://example.edu/second", "https://example.edu/third"]
+              .map(pageUrl => ({ pageUrl, policy: { ...grant("brave"), display: "link_only" as const } }));
+          },
+          publisherPolicies: new Map(["https://commons.wikimedia.org", "https://upload.wikimedia.org"].map(origin => [origin, grant(origin)])),
+        });
+        const result = await discover(universityFixture(), ["campus"], ctx).catch(error => error);
+        expect(officialAttempts).toEqual(mode === "first-supports" ? ["https://example.edu/first"]
+          : ["https://example.edu/first", "https://example.edu/second"]);
+        expect(searches).toEqual(['site:example.edu "atrium" Example University']);
+        const paths = transport.requests.filter(request => request.host === "example.edu").map(request => request.path);
+        expect(paths).toEqual(mode === "both-denied" ? ["/robots.txt"] : mode === "denied-first"
+          ? ["/robots.txt", "/second"] : mode === "first-supports" ? ["/robots.txt", "/first"] : ["/robots.txt", "/first", "/second"]);
+        expect(transport.requests.some(request => request.host?.includes("outsider") || request.host?.includes("attacker"))).toBe(false);
+        if (mode === "both-denied" || mode === "both-irrelevant") {
+          // Subsequent files for the same object must not restart the two-page allowance.
+          if (mode === "both-denied") expect(result).toMatchObject({ code: "access_denied" });
+          else {
+            expect(result).toHaveLength(1);
+            expect(result[0].evidence[0]).toMatchObject({ independentEquivalent: false, corroboration: 0 });
+          }
+        } else {
+          expect(result[0]).toMatchObject({ imageUrl: original, evidence: [expect.objectContaining({
+            association: "explicit", independentEquivalent: true, corroboration: 20,
+            corroborationSources: [expect.objectContaining({ source: expect.objectContaining({ url: mode === "first-supports"
+              ? "https://example.edu/first" : "https://example.edu/second" }), independent: true })],
+          })] });
+        }
+        if (mode === "irrelevant-first") {
+          expect(transport.requests.filter(request => request.path !== "/robots.txt")).toHaveLength(12);
+          await expect(safeFetch("https://example.edu/thirteenth", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+          expect(transport.requests.some(request => request.path === "/thirteenth")).toBe(false);
+        }
+      } finally { await transport.close(); }
+    });
   it("completes the real-like licensed chain after two identity pages and stops at the first corroborated file", async () => {
     const categoryPath = "/wiki/Category:Example_University";
     const files = Array.from({ length: 7 }, (_, index) => `/wiki/File:Campus_view_${index + 1}.jpg`);
