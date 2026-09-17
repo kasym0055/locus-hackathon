@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { load } from "cheerio";
 import type { Candidate, Category, Evidence, RunContext, University, UsagePolicy } from "@/server/contracts";
 import { safeFetch } from "@/server/fetch/safe-fetch";
@@ -17,7 +18,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const navigation: string[] = [];
     const licensedPublisherFiles: string[] = [];
     const licensedPublisherCategories: Array<{ url: string; object?: string[] }> = [];
-    const officialSupport: Evidence[] = [];
+    const officialSupport: Array<{ source: Evidence["source"]; excerpt: string }> = [];
     let fallback: Candidate[] = [];
     let lastFailure: unknown;
     const commons = dependencies.publisherPolicies?.get("https://commons.wikimedia.org");
@@ -48,7 +49,8 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       const campus = /\b(?:campus|building|interior|library|atrium|tower|hall|entrance|facilit)\b/u.test(text);
       return (namedObject ? 100 : 0) + (institution ? 20 : 0) + (campus ? 10 : 0);
     };
-    async function inspect(url: string, policy: UsagePolicy, expectedImage?: string, phase: RunContext["publisherPhase"] = "official_discovery"): Promise<Candidate[]> {
+    async function inspect(url: string, policy: UsagePolicy, expectedImage?: string,
+      phase: RunContext["publisherPhase"] = "official_discovery", supportObject?: string[]): Promise<Candidate[]> {
       if (!httpUrl(url) || visited.has(url) || visited.size >= 8) return [];
       visited.add(url);
       try {
@@ -86,6 +88,19 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
           if (fileLinks.length) licensedPublisherFiles.splice(0, licensedPublisherFiles.length,
             ...fileLinks.map(({ url }) => url).filter((url, index, files) => files.indexOf(url) === index).slice(0, 8));
           return [];
+        }
+        if (phase === "official_corroboration" && supportObject && official(page.finalUrl)) {
+          const main = $("main, article").first().clone();
+          main.find("script, style, template, noscript, header, footer, nav").remove();
+          const text = normalized(main.text()).slice(0, 12_000);
+          const term = supportObject.find((value) => text.includes(value));
+          const sourcePolicy = mergePolicy(policy, publisherIdentityPolicy);
+          if (term && sourcePolicy.retention !== "disallowed" && sourcePolicy.display !== "disallowed") {
+            const offset = text.indexOf(term), excerpt = text.slice(Math.max(0, offset - 500), offset + 1_500);
+            const source = { id: createHash("sha256").update(page.finalUrl).digest("hex"), url: page.finalUrl,
+              retrievedAt: page.retrievedAt, policy: sourcePolicy };
+            if (!officialSupport.some((support) => support.source.id === source.id)) officialSupport.push({ source, excerpt });
+          }
         }
         if (official(page.finalUrl)) {
           for (const element of $("a[href]").toArray()) {
@@ -172,7 +187,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         // Preserve search rank within each pass. Diversity is a preference, not
         // an origin ban: another path may pass the unchanged access-policy gate.
         for (const result of [...distinct, ...repeated].slice(0, 3)) {
-          retainOfficialSupport(await inspect(result.pageUrl, result.policy, undefined, "official_corroboration"));
+          retainOfficialSupport(await inspect(result.pageUrl, result.policy, undefined, "official_corroboration", object));
           if (candidates.some(candidate => candidateObject(candidate) === object
             && corroborate(candidate).evidence[0]?.independentEquivalent)) return;
         }

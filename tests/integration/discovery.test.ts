@@ -388,7 +388,7 @@ describe("publisher-first discovery", () => {
         <a href="/wiki/Category:Example_University,_Interiors">Interiors</a>
         <a href="${new URL(target).pathname}">North campus photo</a>`],
       [target, filePage("A view from the North campus of Example University. Example City, KZ")],
-      [official, '<figure><img src="/building.jpg"><figcaption>Our North campus welcomes students.</figcaption></figure>'],
+      [official, "<main><h1>Campuses</h1><p>Our North campus welcomes students.</p></main>"],
     ]);
     const fetched: string[] = [];
     const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "cache_permitted" as const,
@@ -412,5 +412,38 @@ describe("publisher-first discovery", () => {
     expect(candidates[0]).toMatchObject({ imageUrl: original, evidence: [expect.objectContaining({
       independentEquivalent: true, corroboration: 20,
     })] });
+  });
+  it("does not treat official navigation text as object corroboration", async () => {
+    const root = "https://commons.wikimedia.org/wiki/Category:Example_University";
+    const file = "https://commons.wikimedia.org/wiki/File:Example_University_main_atrium.jpg";
+    const original = "https://upload.wikimedia.org/commons/main-atrium.jpg";
+    const official = "https://example.edu/about";
+    const pages = new Map<string, string>([
+      [root, `<a href="${new URL(file).pathname}">Main atrium</a>`],
+      [file, `<div class="fullMedia"><a class="internal" href="${original}">Original</a></div>
+        <table><tr><td id="fileinfotpl_desc">Description</td><td>The main atrium of Example University. Example City, KZ</td></tr>
+        <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer</td></tr></table>
+        <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`],
+      [official, "<nav>Visit our main atrium</nav><main>General university information.</main>"],
+    ]);
+    const fetched: string[] = [];
+    const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "cache_permitted" as const,
+      display: "direct_permitted" as const, basis: ["Documented Wikimedia reuse and direct-display terms"] });
+    const discover = createDiscoveryPlanner({
+      fetchPage: async url => { fetched.push(url); return { ...publisherFixture(pages.get(url) ?? "<main>Irrelevant</main>"), finalUrl: url }; },
+      search: async input => input.kind === "web" ? [{ pageUrl: official, policy: {
+        origin: "search", policyVersion: "v1", retention: "transient_only", display: "link_only", basis: ["Discovery only"],
+      } }] : [],
+      publisherPolicies: new Map([
+        ["https://commons.wikimedia.org", grant("https://commons.wikimedia.org")],
+        ["https://upload.wikimedia.org", grant("https://upload.wikimedia.org")],
+      ]),
+    });
+
+    const candidates = await discover(universityFixture(), ["campus"], contextFixture());
+
+    expect(fetched).toEqual([root, file, official]);
+    expect(candidates[0]).toMatchObject({ imageUrl: original });
+    expect(candidates[0]?.evidence[0]?.independentEquivalent).not.toBe(true);
   });
 });
