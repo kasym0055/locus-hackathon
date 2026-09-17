@@ -6,5 +6,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 export async function POST(request: Request): Promise<Response> {
-  return createProfileHandler({ ...productionSessionOptions(), services: productionServices, waitUntil: after })(request);
+  const response = await createProfileHandler({ ...productionSessionOptions(), services: productionServices, waitUntil: after })(request);
+  const commit = process.env.VERCEL_GIT_COMMIT_SHA;
+  if (commit && /^[a-f0-9]{40}$/.test(commit)) response.headers.set("x-locus-commit", commit);
+  return response;
 }

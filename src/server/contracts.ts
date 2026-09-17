@@ -5,6 +5,9 @@ export interface RunContext {
   readonly signal: AbortSignal;
   readonly startedAt: number;
   readonly deadlineAt: number;
+  // Internal diagnostics only; never supplied by a profile request body.
+  publisherPhase?: "identity" | "official_discovery" | "licensed_category" | "licensed_file"
+    | "official_corroboration" | "image_search" | "image_preparation";
 }
 
 export interface RunContextInput {

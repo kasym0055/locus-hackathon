@@ -18,6 +18,76 @@ const ordinary: Parameters<typeof transportFixture>[0] = (request, response) => 
   else { response.writeHead(200, { "content-type": "text/html" }); response.end("<h1>Publisher</h1>"); }
 };
 
+describe("publisher budget diagnostics", () => {
+  it("reports the first blocked redirect and exact dispatch sequence across pipeline phases without retaining URLs", async () => {
+    const reports: unknown[] = [];
+    const client = await setup((request, response) => {
+      if (request.url === "/robots.txt" || request.url === "/hop-2") return ordinary(request, response);
+      response.writeHead(302, { location: request.url === "/hop-0" ? "/hop-1" : "/hop-2" }); response.end();
+    }, { onBudgetExhausted: report => reports.push(report) });
+    const ctx = { ...contextFixture(), publisherPhase: "identity" as const };
+    await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
+    Object.assign(ctx, { publisherPhase: "licensed_file" });
+    await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
+    await expect(client.safeFetch("http://publisher.org/hop-0", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    await expect(client.safeFetch("http://publisher.org/never-dispatched?secret=private", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      requestId: ctx.requestId, exhausted: "html_attempts", limit: 8,
+      dispatched: { html: 8, image: 0, robots: 1 },
+      blocked: { kind: "html", phase: "licensed_file", hop: 2, origin: 1, target: 4 },
+      attempts: [
+        { ordinal: 1, kind: "robots", phase: "identity", hop: 0, origin: 1, target: 1, status: 404 },
+        { ordinal: 2, kind: "html", phase: "identity", hop: 0, origin: 1, target: 2, status: 302 },
+        { ordinal: 3, kind: "html", phase: "identity", hop: 1, origin: 1, target: 3, status: 302 },
+        { ordinal: 4, kind: "html", phase: "identity", hop: 2, origin: 1, target: 4, status: 200 },
+        { ordinal: 5, kind: "html", phase: "licensed_file", hop: 0, target: 2, status: 302 },
+        { ordinal: 6, kind: "html", phase: "licensed_file", hop: 1, target: 3, status: 302 },
+        { ordinal: 7, kind: "html", phase: "licensed_file", hop: 2, target: 4, status: 200 },
+        { ordinal: 8, kind: "html", phase: "licensed_file", hop: 0, target: 2, status: 302 },
+        { ordinal: 9, kind: "html", phase: "licensed_file", hop: 1, target: 3, status: 302 },
+      ],
+    });
+    expect(JSON.stringify(reports)).not.toMatch(/publisher\.org|hop-|secret|private|https?:|bytes|excerpt/);
+    expect(client.requests.filter(request => request.path.startsWith("/hop-"))).toHaveLength(8);
+    // A new request has a fresh budget and never inherits this request's trace.
+    await expect(client.safeFetch("http://publisher.org/hop-2", "html", contextFixture())).resolves.toMatchObject({ status: 200 });
+    expect(reports).toHaveLength(1);
+  });
+  it("distinguishes origin exhaustion during robots redirects from the HTML cap", async () => {
+    const reports: unknown[] = [];
+    const client = await setup((request, response) => {
+      if (request.url === "/robots.txt" && request.headers.host!.startsWith("source-")) {
+        response.writeHead(302, { location: `http://${request.headers.host!.replace("source-", "destination-")}/robots.txt` }); response.end();
+      } else ordinary(request, response);
+    }, { onBudgetExhausted: report => reports.push(report) });
+    const ctx = contextFixture();
+    for (let index = 0; index < 4; index++) await client.safeFetch(`http://source-${index}.org/page`, "html", ctx).catch(() => {});
+    await expect(client.safeFetch("http://ninth.org/page", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ exhausted: "policy_origins", limit: 8, dispatched: { html: 4, image: 0, robots: 8 }, blocked: { kind: "html", hop: 0 } });
+  });
+  it("keeps a failing diagnostics sink from changing budget enforcement", async () => {
+    const client = await setup(ordinary, { onBudgetExhausted: () => { throw new Error("diagnostics unavailable"); } });
+    const ctx = contextFixture();
+    for (let index = 0; index < 8; index++) await client.safeFetch(`http://publisher.org/${index}`, "html", ctx);
+    await expect(client.safeFetch("http://publisher.org/ninth", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(client.requests.filter(request => request.path !== "/robots.txt")).toHaveLength(8);
+  });
+  it("uses the same HTTP target ID when a repeated fragment URL is rejected before dispatch", async () => {
+    const reports: unknown[] = [];
+    const client = await setup(ordinary, { onBudgetExhausted: report => reports.push(report) });
+    const ctx = contextFixture();
+    for (let index = 0; index < 8; index++) await client.safeFetch("http://publisher.org/page#section", "html", ctx);
+    await expect(client.safeFetch("http://publisher.org/page#section", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ blocked: { target: 2 }, attempts: [
+      { target: 1 }, { target: 2 }, { target: 2 }, { target: 2 }, { target: 2 },
+      { target: 2 }, { target: 2 }, { target: 2 }, { target: 2 },
+    ] });
+  });
+});
+
 describe("pinned public-address transport", () => {
   it.each([
     ["loopback", "http://127.0.0.1/a", "127.0.0.1"],

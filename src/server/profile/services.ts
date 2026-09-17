@@ -43,6 +43,7 @@ export function createProfileServices(options: { ledger: Ledger; apiKey: string;
     };
     const prepared = await createImagePreparer(async (url, kind, context) => {
       requirePermission(url);
+      context.publisherPhase = "image_preparation";
       const result = await fetcher(url, kind, context);
       // The observed chain must agree with the inspected resource, including
       // intermediate origins. Malformed metadata cannot attest to permission.

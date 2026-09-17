@@ -117,6 +117,19 @@ it.each(["oversizedIdentity", "oversizedWire"] as const)("keeps contiguous frami
   expect(seen.map(event => event.seq)).toEqual([1, 2, 3]);
   expect(fixture.stats().providerCalls).toBe(2);
 });
+it.each([
+  ["e75baa8eef521ad1511b5252d2bdb56d7f9c7a67", "e75baa8eef521ad1511b5252d2bdb56d7f9c7a67"],
+  [undefined, null], ["invalid-build-value", null],
+])("exposes only a valid deployed commit on a pre-admission response: %s", async (commit, expected) => {
+  vi.stubEnv("VERCEL_GIT_COMMIT_SHA", commit);
+  try {
+    const { POST } = await import("@/app/api/profile/route");
+    const response = await POST(new Request(`${fixtureOrigin}/api/profile`, { method: "POST", headers: { origin: fixtureOrigin }, body: "{}" }));
+    expect(response.headers.get("x-locus-commit")).toBe(expected);
+    expect(response.status).toBe(503);
+    await response.text();
+  } finally { vi.unstubAllEnvs(); }
+});
 it("rejects content types that only start with the JSON media type", async () => {
   const { fixture, handler, request } = await scenario();
   expect((await handler(request(undefined, { "content-type": "application/json-not-valid" }))).status).toBe(400);

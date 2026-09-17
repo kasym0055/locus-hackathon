@@ -26,10 +26,11 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const official = (url: string) => university.officialDomains.some((domain) => {
       const host = new URL(url).hostname; return host === domain || host.endsWith(`.${domain}`);
     });
-    async function inspect(url: string, policy: UsagePolicy, expectedImage?: string): Promise<Candidate[]> {
+    async function inspect(url: string, policy: UsagePolicy, expectedImage?: string, phase: RunContext["publisherPhase"] = "official_discovery"): Promise<Candidate[]> {
       if (!httpUrl(url) || visited.has(url) || visited.size >= 8) return [];
       visited.add(url);
       try {
+        ctx.publisherPhase = phase;
         const page = await fetchPage(url, ctx);
         assertActive(ctx);
         const pageUrl = new URL(page.finalUrl);
@@ -123,7 +124,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         const results = await search({ query, kind: "web" }, ctx);
         for (const result of results.slice(0, 1)) {
           if (!official(result.pageUrl)) continue;
-          retainOfficialSupport(await inspect(result.pageUrl, result.policy));
+          retainOfficialSupport(await inspect(result.pageUrl, result.policy, undefined, "official_corroboration"));
         }
       }
     };
@@ -154,9 +155,9 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     if (licensedPublisherReady) {
       const title = encodeURIComponent(university.name.replace(/\s+/gu, "_"));
       const licensedPublisherDiscoveryPolicy = { ...publisherIdentityPolicy };
-      await inspect(`https://commons.wikimedia.org/wiki/Category:${title}`, licensedPublisherDiscoveryPolicy);
+      await inspect(`https://commons.wikimedia.org/wiki/Category:${title}`, licensedPublisherDiscoveryPolicy, undefined, "licensed_category");
       for (const file of licensedPublisherFiles) {
-        const candidates = await inspect(file, licensedPublisherDiscoveryPolicy);
+        const candidates = await inspect(file, licensedPublisherDiscoveryPolicy, undefined, "licensed_file");
         let admitted = eligible(candidates);
         if (!admitted.length) {
           await findOfficialCorroboration(candidates);
@@ -168,7 +169,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     // Broader images are reached only after an actual official retrieval gap.
     const results = await search({ query: `${university.name} ${university.city} ${terms}`, kind: "images" }, ctx);
     for (const result of results.slice(0, 4)) {
-      const candidates = await inspect(result.pageUrl, result.policy, result.imageUrl);
+      const candidates = await inspect(result.pageUrl, result.policy, result.imageUrl, "image_search");
       let admitted = eligible(candidates);
       if (!admitted.length) {
         await findOfficialCorroboration(candidates);

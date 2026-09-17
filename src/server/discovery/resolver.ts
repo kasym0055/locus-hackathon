@@ -115,6 +115,7 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
         if (!httpUrl(url) || pages.size >= 6) return;
         pages.set(url, undefined);
         try {
+          ctx.publisherPhase = "identity";
           const page = await fetchPage(url, ctx);
           assertActive(ctx);
           pages.set(url, page);
