@@ -262,12 +262,12 @@ describe("pinned public-address transport", () => {
     expect(client.connections.every((connection) => connection.address === "93.184.216.34" && connection.servername === "publisher.org")).toBe(true);
     expect(client.requests.every((request) => request.host === "publisher.org" && request.userAgent === "VisualUniversityProfile/0.1 (+https://visual-profile-project.org/contact)")).toBe(true);
   });
-  it("allows a bounded identity fetch to complete robots and HTML steps that jointly exceed three seconds", async () => {
+  it.each(["identity", "official_corroboration"] as const)("allows a bounded %s fetch to complete robots and HTML steps that jointly exceed three seconds", async publisherPhase => {
     const reports: unknown[] = [];
     const client = await setup((request, response) => {
       setTimeout(() => ordinary(request, response), 1_550);
     }, { onLocalTimeout: report => { reports.push(report); } });
-    const ctx = { ...contextFixture(), publisherPhase: "identity" as const };
+    const ctx = { ...contextFixture(), publisherPhase };
     const startedAt = Date.now();
 
     await expect(client.safeFetch("https://publisher.org/a", "html", ctx)).resolves.toMatchObject({ status: 200 });

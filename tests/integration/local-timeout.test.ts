@@ -54,10 +54,10 @@ describe("local discovery timeout diagnostics", () => {
     const reports: unknown[] = [];
     const client = createSafeFetcher({ contactUrl: "https://project.org/contact", resolve: async () => new Promise(() => {}),
       onLocalTimeout: report => { reports.push(report); return Promise.reject(new Error("sink unavailable")); } });
-    const ctx = { ...contextFixture(), publisherPhase: "official_corroboration" as const };
+    const ctx = { ...contextFixture(), publisherPhase: "licensed_file" as const };
     await expect(client.safeFetch("https://private-publisher.org/path?private-query", "html", ctx)).rejects.toMatchObject({ code: "deadline" });
     expect(reports).toEqual([{ event: "discovery_local_timeout", requestId: ctx.requestId, component: "publisher",
-      phase: "official_corroboration", kind: "html", elapsedMs: expect.any(Number) }]);
+      phase: "licensed_file", kind: "html", elapsedMs: expect.any(Number) }]);
     expect(JSON.stringify(reports)).not.toMatch(/private|https?:|headers|body/);
   });
   it("reports a local timeout returned by the direct robots/access check", async () => {
