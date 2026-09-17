@@ -8,6 +8,7 @@ import ipaddr from "ipaddr.js";
 import { load } from "cheerio";
 import type { FailureCode, FetchResult, RunContext } from "@/server/contracts";
 import { createAccessPolicy, type AccessResult, type PublisherRule } from "./access-policy";
+import { reportLocalTimeout, type LocalTimeoutSink } from "@/server/discovery/timeout-diagnostics";
 
 type FetchKind = "html" | "image" | "robots";
 const HTML_ATTEMPT_LIMIT = 12;
@@ -40,6 +41,7 @@ export interface FetchDependencies {
   publisherRules?: ReadonlyMap<string, PublisherRule>;
   onBudgetExhausted?: (report: PublisherBudgetReport) => void;
   onAccessDenied?: (report: PublisherAccessDeniedReport) => void | Promise<void>;
+  onLocalTimeout?: LocalTimeoutSink;
 }
 
 export class FetchFailure extends Error {
@@ -293,12 +295,21 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
     }
   }
 
-  async function bounded<T>(ctx: RunContext, operation: (boundedContext: RunContext) => Promise<T>): Promise<T> {
+  async function bounded<T extends FetchResult | AccessResult>(ctx: RunContext, kind: FetchKind, operation: (boundedContext: RunContext) => Promise<T>): Promise<T> {
     assertActive(ctx);
     const remaining = Math.min(3_000, ctx.deadlineAt - Date.now());
-    const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(Math.max(1, remaining))]);
-    try { return await operation({ ...ctx, signal, deadlineAt: Math.min(ctx.deadlineAt, Date.now() + remaining) }); }
+    const local = AbortSignal.timeout(Math.max(1, remaining));
+    const signal = AbortSignal.any([ctx.signal, local]);
+    const reportTimeout = () => reportLocalTimeout(ctx, local, signal, remaining, { component: "publisher", kind,
+      phase: ctx.publisherPhase ?? "unspecified" }, dependencies.onLocalTimeout);
+    try {
+      const result = await operation({ ...ctx, signal, deadlineAt: Math.min(ctx.deadlineAt, Date.now() + remaining) });
+      // Direct policy checks return their failure instead of throwing it.
+      if ("allowed" in result && !result.allowed && result.reason === "deadline") reportTimeout();
+      return result;
+    }
     catch (error) {
+      reportTimeout();
       if (signal.aborted) throw aborted(signal);
       if (error instanceof FetchFailure) throw error;
       throw new FetchFailure("dependency_unavailable");
@@ -311,12 +322,12 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
       const budget = contentBudget(kind, ctx.publisherPhase);
       if (count[kind] >= budget.limit) throw budgetFailure(ctx, ctx, validatedUrl, kind, 0, budget.exhausted);
     }
-    return bounded(ctx, (boundedContext) => rawFetch(url, kind, boundedContext, ctx));
+    return bounded(ctx, kind, (boundedContext) => rawFetch(url, kind, boundedContext, ctx));
   }
   async function checkAccess(url: string, ctx: RunContext): Promise<AccessResult> {
     try {
       validateUrl(url);
-      const result = await bounded(ctx, (boundedContext) => policy.checkAccess(url, boundedContext, ctx));
+      const result = await bounded(ctx, "robots", (boundedContext) => policy.checkAccess(url, boundedContext, ctx));
       // This public method performs only a robots/access-policy check; it does
       // not dispatch content or know whether its caller intends HTML or an image.
       if (!result.allowed && result.reason === "access_denied") {

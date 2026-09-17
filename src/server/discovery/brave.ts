@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { RunContext, UsagePolicy } from "@/server/contracts";
 import type { Ledger } from "@/server/usage/ledger";
 import { assertActive, DiscoveryFailure, httpUrl, providerJson } from "./http";
+import type { LocalTimeoutSink } from "./timeout-diagnostics";
 
 export interface SearchInput { query: string; kind: "web" | "images" }
 export interface DiscoveryRecord { pageUrl: string; imageUrl?: string; policy: UsagePolicy }
@@ -12,7 +13,8 @@ const imageSchema = z.object({ type: z.literal("images"), results: z.array(z.obj
 const policy: UsagePolicy = { origin: "https://api.search.brave.com", policyVersion: "v1",
   retention: "transient_only", display: "link_only", basis: ["Brave Search discovery; transient operational processing only; publisher verification required"] };
 
-export function createBraveSearch(dependencies: { apiKey: string; ledger: Pick<Ledger, "reserve" | "settle" | "check">; fetch?: typeof fetch }): Search {
+export function createBraveSearch(dependencies: { apiKey: string; ledger: Pick<Ledger, "reserve" | "settle" | "check">; fetch?: typeof fetch;
+  onLocalTimeout?: LocalTimeoutSink }): Search {
   const attempts = new WeakMap<RunContext, number>();
   return async (input, ctx) => {
     assertActive(ctx);
@@ -30,7 +32,8 @@ export function createBraveSearch(dependencies: { apiKey: string; ledger: Pick<L
       assertActive(ctx);
       dispatched = true;
       const payload = await providerJson(dependencies.fetch ?? fetch, new URL(`${endpoint}?${parameters}`), ctx,
-        { "x-subscription-token": dependencies.apiKey });
+        { "x-subscription-token": dependencies.apiKey },
+        { kind: input.kind === "web" ? "web_search" : "image_search", sink: dependencies.onLocalTimeout });
       await dependencies.ledger.settle(reservation, 1);
       if (input.kind === "web") {
         const parsed = webSchema.safeParse(payload);

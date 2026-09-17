@@ -1,4 +1,5 @@
 import type { FailureCode, RunContext } from "@/server/contracts";
+import { reportLocalTimeout, type LocalTimeoutSink } from "./timeout-diagnostics";
 
 export class DiscoveryFailure extends Error {
   constructor(readonly code: FailureCode) { super(code); this.name = "DiscoveryFailure"; }
@@ -9,9 +10,12 @@ export function assertActive(ctx: RunContext) {
 }
 
 // Fixed provider endpoints only. Publisher URLs always use the separate safe fetcher.
-export async function providerJson(fetcher: typeof fetch, url: URL, ctx: RunContext, headers: Record<string, string> = {}): Promise<unknown> {
+export async function providerJson(fetcher: typeof fetch, url: URL, ctx: RunContext, headers: Record<string, string> = {},
+  diagnostic?: { kind: "web_search" | "image_search"; sink?: LocalTimeoutSink }): Promise<unknown> {
   assertActive(ctx);
-  const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(Math.max(1, Math.min(3_000, ctx.deadlineAt - Date.now())))]);
+  const duration = Math.max(1, Math.min(3_000, ctx.deadlineAt - Date.now()));
+  const local = AbortSignal.timeout(duration);
+  const signal = AbortSignal.any([ctx.signal, local]);
   try {
     const response = await fetcher(url, { headers: { accept: "application/json", ...headers }, signal, redirect: "error", cache: "no-store" });
     if (!response.ok) { await response.body?.cancel(); throw new DiscoveryFailure("dependency_unavailable"); }
@@ -32,6 +36,7 @@ export async function providerJson(fetcher: typeof fetch, url: URL, ctx: RunCont
     try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
     catch { throw new DiscoveryFailure("invalid_provider_output"); }
   } catch (error) {
+    if (diagnostic) reportLocalTimeout(ctx, local, signal, duration, { component: "provider", kind: diagnostic.kind }, diagnostic.sink);
     if (ctx.signal.aborted) throw new DiscoveryFailure("cancelled");
     if (signal.aborted) throw new DiscoveryFailure("deadline");
     if (error instanceof DiscoveryFailure) throw error;

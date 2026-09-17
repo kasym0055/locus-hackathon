@@ -304,3 +304,49 @@ for this patch. After promotion, verify the deployed commit, run exactly one NU
 request, and promptly capture its stages, latency, warnings, denial/budget events,
 OpenAI call count and final status. Discovery/corroboration remains open until
 preparation, assessment and a real OpenAI call are confirmed. Task 6 must not start.
+
+## Local-timeout classification diagnostics (2026-09-17)
+
+Production request `7c786354-ad78-431c-aa18-11629cd02f7e` progressed through
+resolving, identity and discovering, then returned `deadline` and
+`insufficient_evidence` after 8,868 ms. No preparing, assessing, image or OpenAI
+assessment was observed. The 27-second outer deadline does not explain that
+elapsed time. Both Brave's provider JSON transport and publisher safe-fetch have
+local three-second timers mapped to the same failure code; the responsible
+component has not yet been established by Production evidence.
+
+This diagnostic-only patch emits `discovery_local_timeout` only when the full
+local three-second timer wins the composed abort signal, the outer signal is
+still active, and the outer deadline has not elapsed. Shorter timers limited by
+the remaining request deadline, client cancellation, outer TimeoutError signals,
+ordinary dependency failures, access denials and budget failures do not produce
+this event. Existing failure codes and durations remain unchanged.
+
+Provider reports include only event name, request ID, `component=provider`,
+`kind=web_search|image_search`, and elapsed milliseconds. The search kind is passed
+explicitly by Brave; Wikidata identity calls are not mislabeled as Brave searches.
+Publisher reports add the existing publisher phase and the bounded operation's
+fetch kind (`html|image|robots`). An HTML/image operation includes its prerequisite
+robots work; a direct access-policy check is labeled `robots`. Both thrown
+timeouts and direct access-check timeout results are observed. No URL, hostname,
+query, header, key, response body or image data is included.
+
+The shared reporter uses request-local weak state, allowing at most one event per
+component per request (two total). Sink failures, including rejected promises,
+are isolated and never awaited. Tests use real local timer expiry to distinguish
+provider and publisher timeouts, including direct policy checks, while preserving
+the original failure behavior. Additional cases cover outer deadline/cancellation,
+competing signals, safe payloads, report limits and sink failures.
+
+Verification: 114 focused tests passed; the full suite passed all 16 files with
+340 tests passed and eight existing Redis-dependent skips. Typecheck, lint,
+production build and diff checks passed. An earlier combined focused run hit the
+previously observed Windows native worker exit in safe-fetch; the final focused
+and full runs passed without changing the runner configuration or assertions.
+
+After push, stop for Production promotion. No new NU request has been issued.
+Once promoted, verify the commit and open Vercel Live Logs before exactly one NU
+request. Capture only `discovery_local_timeout`, `publisher_access_denied`,
+`publisher_budget_exhausted`, and the final response stages. Do not implement a
+timeout-duration or classification fix before that live run identifies provider
+versus publisher. M1 remains open; Task 6 must not start.
