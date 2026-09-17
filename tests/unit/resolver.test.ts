@@ -43,11 +43,24 @@ describe("conservative institution resolution", () => {
   });
   it("rejects a matching title without contact/city corroboration and attempts fallback", async () => {
     const searches: string[] = [];
+    const reports: unknown[] = [];
     const resolve = createResolver({ lookup: async () => [identity],
       search: async (input) => { searches.push(input.query); return []; },
-      fetchPage: async () => publisherFixture("<h1>Example University</h1>") });
+      fetchPage: async () => publisherFixture("<h1>Example University</h1>"),
+      onNotFound: report => { reports.push(report); } });
     expect((await resolve({ query: identity.name, countryHint: "" }, contextFixture())).kind).not.toBe("resolved");
     expect(searches).toHaveLength(1);
+    expect(reports).toEqual([{ event: "resolver_not_found", requestId: "synthetic-request",
+      lookupCount: 1, relevantCount: 1, searchResultCount: 0, inspectedCount: 1,
+      attempts: [{ target: 1, source: "wikidata_website", outcome: "official_contact_missing" }],
+      elapsedMs: expect.any(Number) }]);
+  });
+  it("does not let a resolver diagnostic sink failure change not-found behavior", async () => {
+    const resolve = createResolver({ lookup: async () => [identity], search: async () => [],
+      fetchPage: async () => publisherFixture("<h1>Example University</h1>"),
+      onNotFound: () => { throw new Error("diagnostic sink unavailable"); } });
+
+    expect(await resolve({ query: identity.name, countryHint: "" }, contextFixture())).toEqual({ kind: "not_found" });
   });
   it("prioritizes a same-domain contact result without spending publisher fetches on generic results", async () => {
     const inspected: string[] = [];

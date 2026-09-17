@@ -21,6 +21,20 @@ function source(url: string, policy: UsagePolicy, retrievedAt = new Date().toISO
   return { id: identifier(url), url, policy, retrievedAt };
 }
 interface PublisherInstitution { name: string; city: string; country: string; website?: string }
+type ResolverAttemptSource = "wikidata_website" | "search_result";
+type ResolverAttemptOutcome = "fetch_unavailable" | "origin_mismatch" | "structured_location_conflict"
+  | "name_mismatch" | "location_missing" | "official_contact_missing" | "entity_link_missing";
+export interface ResolverNotFoundReport {
+  event: "resolver_not_found";
+  requestId: string;
+  lookupCount: number;
+  relevantCount: number;
+  searchResultCount: number;
+  inspectedCount: number;
+  attempts: Array<{ target: number; source: ResolverAttemptSource; outcome: ResolverAttemptOutcome }>;
+  elapsedMs: number;
+}
+export type ResolverNotFoundSink = (report: ResolverNotFoundReport) => void;
 function structuredInstitutions($: CheerioAPI): PublisherInstitution[] {
   const institutions: PublisherInstitution[] = [];
   for (const element of $("script[type='application/ld+json']").toArray().slice(0, 8)) {
@@ -97,10 +111,12 @@ function hasOfficialContact($: CheerioAPI, domain: string, city: string, country
   });
 }
 
-export function createResolver(dependencies: { lookup?: Lookup; search?: Search; fetchPage?: PageFetcher } = {}) {
+export function createResolver(dependencies: { lookup?: Lookup; search?: Search; fetchPage?: PageFetcher;
+  onNotFound?: ResolverNotFoundSink } = {}) {
   const lookup = dependencies.lookup ?? lookupWikidata;
   const search = dependencies.search ?? searchBrave;
   const fetchPage = dependencies.fetchPage ?? ((url, ctx) => safeFetch(url, "html", ctx));
+  const onNotFound = dependencies.onNotFound ?? ((report: ResolverNotFoundReport) => console.warn(JSON.stringify(report)));
   return async (query: ProfileQuery, ctx: RunContext): Promise<Resolution> => {
     try {
       assertActive(ctx);
@@ -114,6 +130,17 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
       const relevant = identities.filter((item) => [item.name, ...item.aliases].some((name) => normalizeQuery(name) === normalized)).slice(0, 5);
       const resolved = new Map<string, University>();
       const pages = new Map<string, FetchResult | undefined>();
+      const targets = new Map<string, number>();
+      const attempts: ResolverNotFoundReport["attempts"] = [];
+      let searchResultCount = 0;
+      const target = (url: string) => {
+        const existing = targets.get(url);
+        if (existing) return existing;
+        const id = targets.size + 1; targets.set(url, id); return id;
+      };
+      const rejected = (url: string, source: ResolverAttemptSource, outcome: ResolverAttemptOutcome) => {
+        if (attempts.length < 8) attempts.push({ target: target(url), source, outcome });
+      };
       async function inspect(url: string): Promise<FetchResult | undefined> {
         if (pages.has(url)) return pages.get(url);
         if (!httpUrl(url) || pages.size >= 6) return;
@@ -127,25 +154,30 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
         } catch { assertActive(ctx); failed = true; }
       }
 
-      async function verify(identity: WikidataIdentity, url: string, inherited?: UsagePolicy, independentSources?: SourceRef[]) {
+      async function verify(identity: WikidataIdentity, url: string, inherited?: UsagePolicy,
+        independentSources?: SourceRef[], attemptSource: ResolverAttemptSource = "search_result") {
         try {
           const page = await inspect(url);
-          if (!page) return;
+          if (!page) { rejected(url, attemptSource, "fetch_unavailable"); return; }
           const domain = identity.website ? new URL(identity.website).hostname : new URL(url).hostname;
-          if (!sameHost(page.finalUrl, domain)) return;
+          if (!sameHost(page.finalUrl, domain)) { rejected(url, attemptSource, "origin_mismatch"); return; }
           const $ = publisherDocument(page);
           const headings = $("title, h1").toArray().map((element) => normalizeQuery($(element).text()));
           const matchingName = [identity.name, ...identity.aliases].some((name) => headings.some((heading) => heading.includes(normalizeQuery(name))));
           const structured = structuredLocation($, identity);
           if (structured && ((identity.city && normalizeQuery(identity.city) !== normalizeQuery(structured.city))
-            || (identity.country && normalizeQuery(identity.country) !== normalizeQuery(structured.country)))) return;
+            || (identity.country && normalizeQuery(identity.country) !== normalizeQuery(structured.country)))) {
+            rejected(url, attemptSource, "structured_location_conflict"); return;
+          }
           const city = identity.city ?? structured?.city;
           const country = identity.country ?? structured?.country;
-          if (!city || !country) return;
+          if (!matchingName) { rejected(url, attemptSource, "name_mismatch"); return; }
+          if (!city || !country) { rejected(url, attemptSource, "location_missing"); return; }
           const sameAs = $("a[href]").toArray().some((element) => $(element).attr("href") === `https://www.wikidata.org/wiki/${identity.entityId}`)
             || $("script[type='application/ld+json']").toArray().some((element) => $(element).text().includes(`https://www.wikidata.org/wiki/${identity.entityId}`));
           // A missing Wikidata website needs an explicit entity link on the original page.
-          if (!matchingName || !hasOfficialContact($, domain, city, country) || (!identity.website && !sameAs)) return;
+          if (!hasOfficialContact($, domain, city, country)) { rejected(url, attemptSource, "official_contact_missing"); return; }
+          if (!identity.website && !sameAs) { rejected(url, attemptSource, "entity_link_missing"); return; }
           const publisherPolicy = inherited ? mergePolicy(inherited, publisherIdentityPolicy) : publisherIdentityPolicy;
           resolved.set(identity.entityId, { id: identity.entityId, name: identity.name, aliases: identity.aliases,
             campus: city, city, country, officialDomains: [domain], sources: [
@@ -185,18 +217,19 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
             if (!corroborating) continue;
             const independentSource = source(corroborating.page.finalUrl, mergePolicy(corroborating.record.policy, publisherIdentityPolicy), corroborating.page.retrievedAt);
             await verify({ entityId: `publisher:${identifier(`${domain}|${normalized}|${institution.city}|${institution.country}`)}`,
-              ...institution, aliases: [] }, primary.record.pageUrl, primary.record.policy, [independentSource]);
+              ...institution, aliases: [] }, primary.record.pageUrl, primary.record.policy, [independentSource], "search_result");
           }
         }
       }
 
       for (const identity of relevant) {
-        if (identity.website) await verify(identity, identity.website);
+        if (identity.website) await verify(identity, identity.website, undefined, undefined, "wikidata_website");
       }
       if (resolved.size !== relevant.length || relevant.length === 0) {
         let records: DiscoveryRecord[] = [];
         try { records = await search({ query: `${query.query} ${query.countryHint} official university contact`, kind: "web" }, ctx); }
         catch { assertActive(ctx); failed = true; }
+        searchResultCount = records.length;
         if (!relevant.length) await recoverFromPublishers(records);
         for (const identity of relevant) {
           const candidates = records.filter((record) => !identity.website || sameHost(record.pageUrl, new URL(identity.website).hostname))
@@ -204,7 +237,7 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
             .sort((a, b) => b.priority - a.priority || a.index - b.index).slice(0, 2);
           for (const { record } of candidates) {
             if (resolved.has(identity.entityId)) break;
-            await verify(identity, record.pageUrl, record.policy);
+            await verify(identity, record.pageUrl, record.policy, undefined, "search_result");
           }
         }
       }
@@ -219,7 +252,11 @@ export function createResolver(dependencies: { lookup?: Lookup; search?: Search;
         selectionToken: "",
       })) };
       if (universities.length === 1) return { kind: "resolved", university: universities[0] };
-      return failed ? { kind: "unavailable", code: "dependency_unavailable" } : { kind: "not_found" };
+      if (failed) return { kind: "unavailable", code: "dependency_unavailable" };
+      try { onNotFound({ event: "resolver_not_found", requestId: ctx.requestId, lookupCount: identities.length,
+        relevantCount: relevant.length, searchResultCount, inspectedCount: pages.size,
+        attempts, elapsedMs: Math.max(0, Date.now() - ctx.startedAt) }); } catch { /* Diagnostics never affect resolution. */ }
+      return { kind: "not_found" };
     } catch (error) {
       return { kind: "unavailable", code: error instanceof DiscoveryFailure ? error.code : "dependency_unavailable" };
     }
