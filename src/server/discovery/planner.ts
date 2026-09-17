@@ -16,6 +16,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const visited = new Set<string>();
     const navigation: string[] = [];
     const licensedPublisherFiles: string[] = [];
+    const licensedPublisherCategories: Array<{ url: string; object?: string[] }> = [];
     const officialSupport: Evidence[] = [];
     let fallback: Candidate[] = [];
     let lastFailure: unknown;
@@ -26,6 +27,27 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
     const official = (url: string) => university.officialDomains.some((domain) => {
       const host = new URL(url).hostname; return host === domain || host.endsWith(`.${domain}`);
     });
+    // M1 corroborates only narrowly named, campus-specific objects. Generic
+    // facilities such as a library or dormitory are not unique enough.
+    const objectTerms = [["main atrium", "atrium"], ["main building", "administrative building"], ["clock tower"]];
+    const normalized = (value: string) => value.normalize("NFKC").toLocaleLowerCase("und").replace(/\s+/gu, " ").trim();
+    const rankingText = (value: string) => normalized(value).replace(/[^\p{L}\p{N}]+/gu, " ");
+    const institutionTokens = rankingText(university.name).split(" ").filter((token) => token.length > 2);
+    const namedCampusObject = (value: string) => {
+      const tokens = rankingText(value).split(" ").filter(Boolean);
+      const campus = tokens.lastIndexOf("campus");
+      if (campus < 1) return;
+      const qualifier = tokens.slice(0, campus).filter((token) => token.length > 2
+        && !institutionTokens.includes(token) && !["and", "the"].includes(token)).slice(-3);
+      return qualifier.length ? [`${qualifier.join(" ")} campus`] : undefined;
+    };
+    const filePriority = (value: string) => {
+      const text = rankingText(value);
+      const namedObject = objectTerms.some((terms) => terms.some((term) => text.includes(term)));
+      const institution = institutionTokens.length > 0 && institutionTokens.every((token) => text.includes(token));
+      const campus = /\b(?:campus|building|interior|library|atrium|tower|hall|entrance|facilit)\b/u.test(text);
+      return (namedObject ? 100 : 0) + (institution ? 20 : 0) + (campus ? 10 : 0);
+    };
     async function inspect(url: string, policy: UsagePolicy, expectedImage?: string, phase: RunContext["publisherPhase"] = "official_discovery"): Promise<Candidate[]> {
       if (!httpUrl(url) || visited.has(url) || visited.size >= 8) return [];
       visited.add(url);
@@ -36,17 +58,33 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
         const pageUrl = new URL(page.finalUrl);
         const $ = load(new TextDecoder().decode(page.bytes));
         if (pageUrl.origin === "https://commons.wikimedia.org" && /^\/wiki\/Category(?::|%3A)/i.test(pageUrl.pathname)) {
-          for (const element of $('a[href^="/wiki/File:"]').toArray()) {
+          const categoryLinks = $('a[href^="/wiki/Category:"]').toArray().slice(0, 100).flatMap((element) => {
+            try {
+              const target = new URL($(element).attr("href")!, page.finalUrl); target.hash = "";
+              const text = rankingText(`${$(element).text()} ${decodeURIComponent(target.pathname)}`);
+              const topical = /\b(?:campus|buildings?|interiors?|library|facilities)\b/u.test(text);
+              const institution = institutionTokens.length > 0 && institutionTokens.every((token) => text.includes(token));
+              return target.origin === pageUrl.origin && /^\/wiki\/Category:/i.test(target.pathname)
+                && topical && institution ? [{ url: target.href, object: namedCampusObject($(element).text()),
+                  priority: filePriority(text) }] : [];
+            } catch { return []; }
+          }).sort((a, b) => b.priority - a.priority);
+          for (const { url, object } of categoryLinks) {
+            if (licensedPublisherCategories.some((category) => category.url === url)) continue;
+            licensedPublisherCategories.push({ url, object });
+            if (licensedPublisherCategories.length === 4) break;
+          }
+          const fileLinks = $('a[href^="/wiki/File:"]').toArray().slice(0, 200).flatMap((element, index) => {
             try {
               const target = new URL($(element).attr("href")!, page.finalUrl); target.hash = "";
               const title = decodeURIComponent(target.pathname).toLocaleLowerCase("und");
               if (target.origin !== pageUrl.origin || !/^\/wiki\/File:/i.test(target.pathname)
-                || /(?:emblem|logo|logotype|delegation|gala|conference|presenting|portrait|visitors?['’_%]*_?book)/iu.test(title)
-                || licensedPublisherFiles.includes(target.href)) continue;
-              licensedPublisherFiles.push(target.href);
-              if (licensedPublisherFiles.length === 8) break;
-            } catch { /* invalid publisher navigation is not a candidate */ }
-          }
+                || /(?:emblem|logo|logotype|delegation|gala|conference|presenting|portrait|visitors?['’_%]*_?book)/iu.test(title)) return [];
+              return [{ url: target.href, priority: filePriority(`${$(element).text()} ${title}`), index }];
+            } catch { return []; }
+          }).sort((a, b) => b.priority - a.priority || a.index - b.index);
+          if (fileLinks.length) licensedPublisherFiles.splice(0, licensedPublisherFiles.length,
+            ...fileLinks.map(({ url }) => url).filter((url, index, files) => files.indexOf(url) === index).slice(0, 8));
           return [];
         }
         if (official(page.finalUrl)) {
@@ -75,10 +113,6 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
           });
       } catch (error) { assertActive(ctx); lastFailure = error; return []; }
     }
-    // M1 corroborates only narrowly named, campus-specific objects. Generic
-    // facilities such as a library or dormitory are not unique enough.
-    const objectTerms = [["main atrium", "atrium"], ["main building", "administrative building"], ["clock tower"]];
-    const normalized = (value: string) => value.normalize("NFKC").toLocaleLowerCase("und").replace(/\s+/gu, " ").trim();
     const candidateObject = (candidate: Candidate) => {
       const primary = candidate.evidence[0];
       if (!primary || primary.authority !== "attributable" || primary.association !== "explicit") return;
@@ -172,6 +206,12 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       const title = encodeURIComponent(university.name.replace(/\s+/gu, "_"));
       const licensedPublisherDiscoveryPolicy = { ...publisherIdentityPolicy };
       await inspect(`https://commons.wikimedia.org/wiki/Category:${title}`, licensedPublisherDiscoveryPolicy, undefined, "licensed_category");
+      // Follow at most one institution-specific topical category. This spends a
+      // fixed page attempt and replaces generic root files with its ranked set.
+      for (const category of licensedPublisherCategories.slice(0, 1)) {
+        if (category.object) objectTerms.push(category.object);
+        await inspect(category.url, licensedPublisherDiscoveryPolicy, undefined, "licensed_category");
+      }
       for (const file of licensedPublisherFiles) {
         const candidates = await inspect(file, licensedPublisherDiscoveryPolicy, undefined, "licensed_file");
         let admitted = eligible(candidates);

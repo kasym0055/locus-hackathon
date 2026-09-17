@@ -232,7 +232,7 @@ describe("publisher-first discovery", () => {
     });
     const [candidate] = await discover(universityFixture(), ["campus"], contextFixture());
     expect(searches).toEqual(['web:site:example.edu "atrium" Example University']);
-    expect(fetched).toEqual([category, event, lab, target, corroboration]);
+    expect(fetched).toEqual([category, target, corroboration]);
     expect(candidate).toMatchObject({ imageUrl: targetOriginal, policy: { display: "direct_permitted", retention: "transient_only",
       attributionText: "Campus Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
@@ -368,5 +368,49 @@ describe("publisher-first discovery", () => {
         independentEquivalent: true, corroboration: 20,
       })] });
     } finally { await transport.close(); }
+  });
+  it("uses one relevant Commons subcategory and corroborates its named campus within the existing budget", async () => {
+    const root = "https://commons.wikimedia.org/wiki/Category:Example_University";
+    const campus = "https://commons.wikimedia.org/wiki/Category:Example_University,_North_campus";
+    const target = "https://commons.wikimedia.org/wiki/File:Example_University,_North_campus_2025.jpg";
+    const original = "https://upload.wikimedia.org/commons/north-campus.jpg";
+    const official = "https://example.edu/campus/north";
+    const irrelevant = Array.from({ length: 12 }, (_, index) => `/wiki/File:Archive_item_${index + 1}.jpg`);
+    const campusFiles = Array.from({ length: 12 }, (_, index) => `/wiki/File:Campus_view_${index + 1}.jpg`);
+    const filePage = (description: string) => `<div class="fullMedia"><a class="internal" href="${original}">Original</a></div>
+      <table><tr><td id="fileinfotpl_desc">Description</td><td>${description}</td></tr>
+      <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer</td></tr></table>
+      <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`;
+    const pages = new Map<string, string>([
+      [root, `<a href="/wiki/Category:Example_University,_North_campus">North campus</a>
+        ${irrelevant.map(path => `<a href="${path}">Archive</a>`).join("")}`],
+      [campus, `${campusFiles.map(path => `<a href="${path}">Campus view</a>`).join("")}
+        <a href="/wiki/Category:Example_University,_Interiors">Interiors</a>
+        <a href="${new URL(target).pathname}">North campus photo</a>`],
+      [target, filePage("A view from the North campus of Example University. Example City, KZ")],
+      [official, '<figure><img src="/building.jpg"><figcaption>Our North campus welcomes students.</figcaption></figure>'],
+    ]);
+    const fetched: string[] = [];
+    const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "cache_permitted" as const,
+      display: "direct_permitted" as const, basis: ["Documented Wikimedia reuse and direct-display terms"] });
+    const discover = createDiscoveryPlanner({
+      fetchPage: async url => { fetched.push(url); return { ...publisherFixture(pages.get(url) ?? "<main>Irrelevant</main>"), finalUrl: url }; },
+      search: async input => input.kind === "web" ? [{ pageUrl: official, policy: {
+        origin: "search", policyVersion: "v1", retention: "transient_only", display: "link_only", basis: ["Discovery only"],
+      } }] : [],
+      publisherPolicies: new Map([
+        ["https://commons.wikimedia.org", grant("https://commons.wikimedia.org")],
+        ["https://upload.wikimedia.org", grant("https://upload.wikimedia.org")],
+      ]),
+    });
+
+    const candidates = await discover(universityFixture(), ["campus"], contextFixture());
+
+    expect(fetched).toEqual([root, campus, target, official]);
+    expect(fetched.some(url => irrelevant.some(path => url.endsWith(path)))).toBe(false);
+    expect(fetched.some(url => campusFiles.some(path => url.endsWith(path)))).toBe(false);
+    expect(candidates[0]).toMatchObject({ imageUrl: original, evidence: [expect.objectContaining({
+      independentEquivalent: true, corroboration: 20,
+    })] });
   });
 });
