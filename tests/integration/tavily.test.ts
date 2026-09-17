@@ -75,14 +75,15 @@ it("does not refund failed dispatches or dispatch after cancellation/budget refu
   await expect(h.search({ query: "test", kind: "web" }, contextFixture(27000, outer.signal))).rejects.toMatchObject({ code: "cancelled" });
   expect(h.requests).toHaveLength(0);
 });
-it("keeps the 3s local provider timeout and uncertain billing", async () => {
+it("keeps the shared discovery cutoff and uncertain billing", async () => {
   const h = harness(); const reports: unknown[] = [];
   const search = createTavilySearch({ apiKey: "synthetic", ledger: h.ledger, onLocalTimeout: r => { reports.push(r); },
     fetch: async (_url, init) => new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true })) });
-  await expect(search({ query: "test", kind: "web" }, contextFixture())).rejects.toMatchObject({ code: "deadline" });
+  const ctx = { ...contextFixture(), startedAt: Date.now() - 16_950 };
+  await expect(search({ query: "test", kind: "web" }, ctx)).rejects.toMatchObject({ code: "deadline" });
   expect(reports).toEqual([expect.objectContaining({ component: "provider", kind: "web_search" })]);
   expect(h.ledger.settle).toHaveBeenCalledWith("reservation", null);
-}, 5000);
+});
 it("joins hints only to collected parser evidence and isolates request-local data", async () => {
   const h = harness(); const collector = collectDiscoveryContext(h.search), ctx = contextFixture();
   await collector.search({ query: "test", kind: "web" }, ctx);

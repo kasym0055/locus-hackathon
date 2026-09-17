@@ -6,12 +6,12 @@ export type LocalTimeoutReport = TimeoutDetails & { event: "discovery_local_time
 export type LocalTimeoutSink = (report: LocalTimeoutReport) => void | Promise<void>;
 const reported = new WeakMap<RunContext, Set<TimeoutDetails["component"]>>();
 
-// Observe only a full local 3s timer winning the composite signal. A timer
-// shortened by the outer deadline, outer cancellation, or late catch is not local.
+// Observe only the request-local discovery window winning the composite
+// signal. The outer request deadline and client cancellation remain distinct.
 export function reportLocalTimeout(ctx: RunContext, local: AbortSignal, combined: AbortSignal, duration: number,
   details: TimeoutDetails, sink: LocalTimeoutSink = report => console.warn(JSON.stringify(report))) {
   try {
-    if (duration !== 3_000 || !local.aborted || combined.reason !== local.reason
+    if (duration <= 0 || !local.aborted || combined.reason !== local.reason
       || ctx.signal.aborted || Date.now() >= ctx.deadlineAt) return;
     let components = reported.get(ctx);
     if (!components) { components = new Set(); reported.set(ctx, components); }

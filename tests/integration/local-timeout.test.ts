@@ -10,6 +10,10 @@ const waitForAbort: typeof fetch = async (_, init) => new Promise((_, reject) =>
   else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 });
 const ledger = { reserve: async () => "reservation", check: async () => {}, settle: async () => {} };
+const nearDiscoveryCutoff = () => {
+  const now = Date.now();
+  return { ...contextFixture(), startedAt: now - 16_950, deadlineAt: now + 10_000 };
+};
 
 describe("local discovery timeout diagnostics", () => {
   it("bounds the default server log to one event per component and resets for each request", () => {
@@ -42,7 +46,7 @@ describe("local discovery timeout diagnostics", () => {
   });
   it.each(["web", "images"] as const)("reports provider %s local timeout with no request content", async kind => {
     const reports: unknown[] = [];
-    const ctx = contextFixture();
+    const ctx = nearDiscoveryCutoff();
     const search = createBraveSearch({ apiKey: "private-key", ledger, fetch: waitForAbort,
       onLocalTimeout: report => { reports.push(report); throw new Error("sink unavailable"); } });
     await expect(search({ query: "private-query", kind }, ctx)).rejects.toMatchObject({ code: "deadline" });
@@ -54,7 +58,7 @@ describe("local discovery timeout diagnostics", () => {
     const reports: unknown[] = [];
     const client = createSafeFetcher({ contactUrl: "https://project.org/contact", resolve: async () => new Promise(() => {}),
       onLocalTimeout: report => { reports.push(report); return Promise.reject(new Error("sink unavailable")); } });
-    const ctx = { ...contextFixture(), publisherPhase: "licensed_file" as const };
+    const ctx = { ...nearDiscoveryCutoff(), publisherPhase: "licensed_file" as const };
     await expect(client.safeFetch("https://private-publisher.org/path?private-query", "html", ctx)).rejects.toMatchObject({ code: "deadline" });
     expect(reports).toEqual([{ event: "discovery_local_timeout", requestId: ctx.requestId, component: "publisher",
       phase: "licensed_file", kind: "html", elapsedMs: expect.any(Number) }]);
@@ -64,10 +68,21 @@ describe("local discovery timeout diagnostics", () => {
     const reports: unknown[] = [];
     const client = createSafeFetcher({ contactUrl: "https://project.org/contact", resolve: async () => new Promise(() => {}),
       onLocalTimeout: report => { reports.push(report); } });
-    const ctx = { ...contextFixture(), publisherPhase: "official_corroboration" as const };
+    const ctx = { ...nearDiscoveryCutoff(), publisherPhase: "official_corroboration" as const };
     expect(await client.checkAccess("https://publisher.org/page", ctx)).toMatchObject({ allowed: false, reason: "deadline" });
     expect(reports).toEqual([{ event: "discovery_local_timeout", requestId: ctx.requestId, component: "publisher",
       phase: "official_corroboration", kind: "robots", elapsedMs: expect.any(Number) }]);
+  });
+  it("allows a provider response beyond three seconds while the shared discovery window remains", async () => {
+    const reports: unknown[] = [];
+    const search = createBraveSearch({ apiKey: "key", ledger, onLocalTimeout: report => { reports.push(report); },
+      fetch: async (_, init) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(Response.json({ type: "search", web: { results: [] } })), 3_100);
+        init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal!.reason); }, { once: true });
+      }) });
+
+    await expect(search({ query: "query", kind: "web" }, contextFixture())).resolves.toEqual([]);
+    expect(reports).toEqual([]);
   });
   it.each(["deadline", "cancel", "outer-timeout"] as const)("does not report local timeouts for outer %s", async mode => {
     const reports: unknown[] = [];

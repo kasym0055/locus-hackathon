@@ -7,6 +7,7 @@ import { Agent, buildConnector, request } from "undici";
 import ipaddr from "ipaddr.js";
 import { load } from "cheerio";
 import type { FailureCode, FetchResult, RunContext } from "@/server/contracts";
+import { discoveryDeadlineAt } from "@/server/limits";
 import { createAccessPolicy, type AccessResult, type PublisherRule } from "./access-policy";
 import { reportLocalTimeout, type LocalTimeoutSink } from "@/server/discovery/timeout-diagnostics";
 
@@ -133,7 +134,7 @@ async function readBytes(body: Readable, encoding: string, limit: number, signal
 
 export function createSafeFetcher(dependencies: FetchDependencies = {}) {
   const resolve = dependencies.resolve ?? ((hostname: string) => lookup(hostname, { all: true, verbatim: true }));
-  const connect = dependencies.connect ?? buildConnector({ rejectUnauthorized: true, allowH2: false, timeout: 3_000 });
+  const connect = dependencies.connect ?? buildConnector({ rejectUnauthorized: true, allowH2: false, timeout: 10_000 });
   const counts = new WeakMap<RunContext, { html: number; image: number }>();
   // Separate from budget traces: at most 16 reports, origins and targets per run.
   // IDs describe denial targets only and restart for each request; no stable hashes.
@@ -254,7 +255,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
         }
         const response = await request(url, { dispatcher, method: "GET", signal: ctx.signal,
           // Undici request does not follow redirects; no redirect interceptor is installed.
-          headersTimeout: 3_000, bodyTimeout: 3_000,
+          headersTimeout: 10_000, bodyTimeout: 10_000,
           headers: { "user-agent": policy.userAgent, accept: kind === "html" ? "text/html, application/xhtml+xml" : kind === "robots" ? "text/plain" : "image/jpeg, image/png, image/webp", "accept-encoding": "gzip, deflate, br" } });
         body = response.body;
         if (attempt) attempt.status = response.statusCode;
@@ -297,20 +298,17 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
 
   async function bounded<T extends FetchResult | AccessResult>(ctx: RunContext, kind: FetchKind, operation: (boundedContext: RunContext) => Promise<T>): Promise<T> {
     assertActive(ctx);
-    // Identity and official corroboration HTML may include both an uncached
-    // robots request and the document request. Each connection, headers wait,
-    // and body read remains capped at three seconds above; this five-second
-    // window only lets those already-bounded steps complete within the 27s request.
-    const compositeHtml = kind === "html"
-      && (ctx.publisherPhase === "identity" || ctx.publisherPhase === "official_corroboration");
-    const operationLimit = compositeHtml ? 5_000 : 3_000;
-    const remaining = Math.min(operationLimit, ctx.deadlineAt - Date.now());
-    const local = AbortSignal.timeout(Math.max(1, remaining));
+    // Resolution and discovery share one request-local window. Image
+    // preparation may use the remaining request time; the outer 27s deadline
+    // still bounds every socket and operation.
+    const operationDeadline = ctx.publisherPhase === "image_preparation" ? ctx.deadlineAt : discoveryDeadlineAt(ctx);
+    const remaining = Math.max(1, operationDeadline - Date.now());
+    const local = AbortSignal.timeout(remaining);
     const signal = AbortSignal.any([ctx.signal, local]);
     const reportTimeout = () => reportLocalTimeout(ctx, local, signal, remaining, { component: "publisher", kind,
       phase: ctx.publisherPhase ?? "unspecified" }, dependencies.onLocalTimeout);
     try {
-      const result = await operation({ ...ctx, signal, deadlineAt: Math.min(ctx.deadlineAt, Date.now() + remaining) });
+      const result = await operation({ ...ctx, signal, deadlineAt: operationDeadline });
       // Direct policy checks return their failure instead of throwing it.
       if ("allowed" in result && !result.allowed && result.reason === "deadline") reportTimeout();
       return result;
