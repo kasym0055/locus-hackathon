@@ -142,7 +142,7 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       }
       for (const domain of university.officialDomains.slice(0, 2)) {
         const results = await search({ query: `site:${domain} ${university.name} ${terms}`, kind: "web" }, ctx);
-        // Preserve the shared eight-page request budget for the licensed-image
+        // Preserve the bounded shared page budget for the licensed-image
         // fallback. The strongest official result is sufficient for M1 evidence.
         for (const result of results.slice(0, 1)) {
           if (!official(result.pageUrl)) continue;

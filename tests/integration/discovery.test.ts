@@ -4,7 +4,8 @@ import { createWikidataLookup } from "@/server/discovery/wikidata";
 import { createDiscoveryPlanner } from "@/server/discovery/planner";
 import { createLedger } from "@/server/usage/ledger";
 import { createResolver } from "@/server/discovery/resolver";
-import { contextFixture, publisherFixture, universityFixture } from "../support/fixtures";
+import { createSafeFetcher } from "@/server/fetch/safe-fetch";
+import { contextFixture, publisherFixture, transportFixture, universityFixture } from "../support/fixtures";
 
 describe("real adapter HTTP boundaries", () => {
   it.each(["web", "images"] as const)("serializes strict SafeSearch and header auth for %s and reserves before dispatch", async (kind) => {
@@ -236,5 +237,48 @@ describe("publisher-first discovery", () => {
       attributionText: "Campus Photographer — CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/" } });
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
       corroboration: 20, independentEquivalent: true });
+  });
+  it("completes the real-like licensed chain after two identity pages and stops at the first corroborated file", async () => {
+    const categoryPath = "/wiki/Category:Example_University";
+    const files = Array.from({ length: 7 }, (_, index) => `/wiki/File:Campus_view_${index + 1}.jpg`);
+    const original = (index: number) => `https://upload.wikimedia.org/commons/campus-${index}.jpg`;
+    const category = `<div class="gallery">${files.map(file => `<a href="${file}">Campus file</a>`).join("")}</div>`;
+    const filePage = (index: number) => `<h1>File page</h1><div class="fullMedia"><a class="internal" href="${original(index)}">Original file</a></div>
+      <table><tr><td id="fileinfotpl_desc">Description</td><td>Example University, ${index === 5 ? "main atrium" : "campus view"}. Example City, KZ</td></tr>
+      <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer ${index}</td></tr></table>
+      <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`;
+    const transport = await transportFixture((request, response) => {
+      if (request.url === "/robots.txt") { response.writeHead(404); response.end(); return; }
+      response.writeHead(200, { "content-type": "text/html" });
+      if (request.headers.host === "commons.wikimedia.org" && request.url === categoryPath) response.end(category);
+      else if (request.headers.host === "commons.wikimedia.org" && files.includes(request.url!)) response.end(filePage(files.indexOf(request.url!)));
+      else if (request.headers.host === "example.edu" && request.url === "/news/atrium") response.end('<figure><img src="/news.jpg"><figcaption>Our beautiful main atrium welcomes campus visitors.</figcaption></figure>');
+      else response.end("<main>Identity page</main>");
+    });
+    try {
+      const safeFetch = createSafeFetcher({ contactUrl: "https://visual-profile-project.org/contact",
+        resolve: async () => [{ address: "93.184.216.34", family: 4 }], connect: transport.connector }).safeFetch;
+      const ctx = { ...contextFixture(), publisherPhase: "identity" as const };
+      await safeFetch("https://example.edu/identity-1", "html", ctx);
+      await safeFetch("https://example.edu/identity-2", "html", ctx);
+      const grant = (origin: string) => ({ origin, policyVersion: "v1", retention: "cache_permitted" as const,
+        display: "direct_permitted" as const, basis: ["Documented Wikimedia reuse and direct-display terms"] });
+      const discover = createDiscoveryPlanner({ fetchPage: (url, context) => safeFetch(url, "html", context),
+        search: async input => input.kind === "web" ? [{ pageUrl: "https://example.edu/news/atrium", policy: {
+          origin: "brave", policyVersion: "v1", retention: "transient_only", display: "link_only", basis: ["Brave discovery"],
+        } }] : [], publisherPolicies: new Map([
+          ["https://commons.wikimedia.org", grant("https://commons.wikimedia.org")],
+          ["https://upload.wikimedia.org", grant("https://upload.wikimedia.org")],
+        ]) });
+      const university = { ...universityFixture(), officialDomains: ["example.edu"] };
+      const candidates = await discover(university, ["campus"], ctx);
+      expect(transport.requests.filter(request => request.path !== "/robots.txt").map(request => `${request.host}${request.path}`)).toEqual([
+        "example.edu/identity-1", "example.edu/identity-2", `commons.wikimedia.org${categoryPath}`,
+        ...files.slice(0, 6).map(file => `commons.wikimedia.org${file}`), "example.edu/news/atrium",
+      ]);
+      expect(candidates[0]).toMatchObject({ imageUrl: original(5), evidence: [expect.objectContaining({
+        independentEquivalent: true, corroboration: 20,
+      })] });
+    } finally { await transport.close(); }
   });
 });

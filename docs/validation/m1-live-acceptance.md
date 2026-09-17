@@ -141,3 +141,40 @@ workaround is not an acceptable next step.
 Only after a real NU OpenAI assessment and verified card should the unfamiliar
 university be attempted. M1 must not be closed, and Task 6 must not start, on the
 basis of local fixtures or this diagnostic deployment.
+
+## Definitive publisher-budget trace and bounded correction
+
+After Production was promoted to diagnostic commit
+`ac341bdb203b2e8c7c69a3c6bf02854bd4f1a125`, `x-locus-commit` returned that exact
+SHA. One NU request (`e9cc6a25-7972-43b8-937b-e95994b4e232`) again stopped in
+discovery with `budget_exhausted`, after 6,765 ms of server time. Its matching
+Vercel event established the exact counter and sequence:
+
+- `exhausted=html_attempts`, `limit=8`;
+- dispatched: eight HTML, zero image, four robots requests;
+- HTML phases: two identity, one licensed category, then five licensed files;
+- the next licensed-file HTML attempt was blocked;
+- image preparation and OpenAI were not reached.
+
+This closes the root-cause investigation: eight raw HTML dispatches cannot fit
+the legitimate generic chain that Production actually followed. The bounded
+architectural correction raises the per-profile HTML limit to 12. Licensed-file
+inspection has a separate ceiling of ten HTML dispatches, reserving attempts 11
+and 12 for immediate official corroboration and its possible redirect/final
+fetch. Image and policy-origin limits remain 24 and eight respectively.
+
+Socket-backed regressions reproduce two identity pages, one Commons category,
+five nonqualifying Commons files, a sixth object-specific licensed file, and
+immediate official corroboration. The planner returns that first corroborated
+candidate without fetching the seventh file. Separate transport tests prove a
+licensed file cannot consume attempts 11 or 12, corroboration can use both, and
+attempt 13 is rejected before dispatch with `budget_exhausted`. The existing
+eight-page planner visitation bound and eight-file shortlist remain unchanged.
+
+Focused safe-fetch, discovery and profile-route verification passed 136 tests.
+The complete suite passed 311 tests with eight existing real-Redis tests skipped
+under `--maxWorkers=1`; typecheck, lint and the production build also passed. A
+prior default-concurrency suite run ended in the known intermittent Windows
+worker fast-fail (`0xC0000409`) without an assertion. The affected 51-test file
+passed alone, and the complete bounded-worker rerun passed, so no application or
+runner configuration was changed for that environmental failure.

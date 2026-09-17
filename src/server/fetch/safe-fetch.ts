@@ -10,10 +10,18 @@ import type { FailureCode, FetchResult, RunContext } from "@/server/contracts";
 import { createAccessPolicy, type AccessResult, type PublisherRule } from "./access-policy";
 
 type FetchKind = "html" | "image" | "robots";
+const HTML_ATTEMPT_LIMIT = 12;
+const IMAGE_ATTEMPT_LIMIT = 24;
+const LICENSED_FILE_ATTEMPT_LIMIT = HTML_ATTEMPT_LIMIT - 2;
+function contentBudget(kind: Exclude<FetchKind, "robots">, phase: RunContext["publisherPhase"]) {
+  if (kind === "image") return { limit: IMAGE_ATTEMPT_LIMIT, exhausted: "image_attempts" as const };
+  if (phase === "licensed_file") return { limit: LICENSED_FILE_ATTEMPT_LIMIT, exhausted: "licensed_file_attempts" as const };
+  return { limit: HTML_ATTEMPT_LIMIT, exhausted: "html_attempts" as const };
+}
 type FetchAttempt = { ordinal: number; kind: FetchKind; phase: NonNullable<RunContext["publisherPhase"]> | "unspecified";
   hop: number; origin: number; target: number; startedMs: number; durationMs?: number; status?: number; failure?: FailureCode };
 export interface PublisherBudgetReport {
-  requestId: string; exhausted: "html_attempts" | "image_attempts" | "policy_origins"; limit: number;
+  requestId: string; exhausted: "html_attempts" | "licensed_file_attempts" | "image_attempts" | "policy_origins"; limit: number;
   dispatched: Record<FetchKind, number>; attempts: FetchAttempt[];
   blocked: Omit<FetchAttempt, "ordinal" | "durationMs" | "status" | "failure">;
 }
@@ -142,7 +150,9 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
         const dispatched = { html: 0, image: 0, robots: 0 };
         for (const attempt of trace.attempts) dispatched[attempt.kind]++;
         // A diagnostic sink must never change transport enforcement or cleanup.
-        try { dependencies.onBudgetExhausted({ requestId: owner.requestId, exhausted, limit: exhausted === "image_attempts" ? 24 : 8,
+        const limit = exhausted === "image_attempts" ? IMAGE_ATTEMPT_LIMIT : exhausted === "html_attempts" ? HTML_ATTEMPT_LIMIT
+          : exhausted === "licensed_file_attempts" ? LICENSED_FILE_ATTEMPT_LIMIT : 8;
+        try { dependencies.onBudgetExhausted({ requestId: owner.requestId, exhausted, limit,
           dispatched, blocked, attempts: trace.attempts.map(attempt => ({ ...attempt })) }); } catch { /* diagnostics only */ }
       }
     }
@@ -189,11 +199,13 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
         if (kind !== "robots") {
           const count = counts.get(owner) ?? { html: 0, image: 0 };
           counts.set(owner, count);
-          if (++count[kind] > (kind === "html" ? 8 : 24)) throw budgetFailure(owner, ctx, url, kind, redirects, kind === "html" ? "html_attempts" : "image_attempts");
+          const budget = contentBudget(kind, ctx.publisherPhase);
+          if (count[kind] >= budget.limit) throw budgetFailure(owner, ctx, url, kind, redirects, budget.exhausted);
+          count[kind]++;
         }
         if (dependencies.onBudgetExhausted) {
           const trace = traceFor(owner);
-          // Eight HTML + 24 image + at most eight four-hop robots chains.
+          // Twelve HTML + 24 image + at most eight four-hop robots chains.
           if (!trace.reported && trace.attempts.length < 64) {
             attempt = { ...target(owner, ctx, url, kind, redirects), ordinal: trace.attempts.length + 1 };
             trace.attempts.push(attempt);
@@ -257,7 +269,8 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
     const validatedUrl = validateUrl(url);
     if (kind !== "robots") {
       const count = counts.get(ctx) ?? { html: 0, image: 0 };
-      if (count[kind] >= (kind === "html" ? 8 : 24)) throw budgetFailure(ctx, ctx, validatedUrl, kind, 0, kind === "html" ? "html_attempts" : "image_attempts");
+      const budget = contentBudget(kind, ctx.publisherPhase);
+      if (count[kind] >= budget.limit) throw budgetFailure(ctx, ctx, validatedUrl, kind, 0, budget.exhausted);
     }
     return bounded(ctx, (boundedContext) => rawFetch(url, kind, boundedContext, ctx));
   }

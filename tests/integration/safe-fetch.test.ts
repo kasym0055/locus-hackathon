@@ -29,13 +29,14 @@ describe("publisher budget diagnostics", () => {
     await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
     Object.assign(ctx, { publisherPhase: "licensed_file" });
     await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
+    await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
     await expect(client.safeFetch("http://publisher.org/hop-0", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
     await expect(client.safeFetch("http://publisher.org/never-dispatched?secret=private", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
     expect(reports).toHaveLength(1);
     expect(reports[0]).toMatchObject({
-      requestId: ctx.requestId, exhausted: "html_attempts", limit: 8,
-      dispatched: { html: 8, image: 0, robots: 1 },
-      blocked: { kind: "html", phase: "licensed_file", hop: 2, origin: 1, target: 4 },
+      requestId: ctx.requestId, exhausted: "licensed_file_attempts", limit: 10,
+      dispatched: { html: 10, image: 0, robots: 1 },
+      blocked: { kind: "html", phase: "licensed_file", hop: 1, origin: 1, target: 3 },
       attempts: [
         { ordinal: 1, kind: "robots", phase: "identity", hop: 0, origin: 1, target: 1, status: 404 },
         { ordinal: 2, kind: "html", phase: "identity", hop: 0, origin: 1, target: 2, status: 302 },
@@ -46,10 +47,12 @@ describe("publisher budget diagnostics", () => {
         { ordinal: 7, kind: "html", phase: "licensed_file", hop: 2, target: 4, status: 200 },
         { ordinal: 8, kind: "html", phase: "licensed_file", hop: 0, target: 2, status: 302 },
         { ordinal: 9, kind: "html", phase: "licensed_file", hop: 1, target: 3, status: 302 },
+        { ordinal: 10, kind: "html", phase: "licensed_file", hop: 2, target: 4, status: 200 },
+        { ordinal: 11, kind: "html", phase: "licensed_file", hop: 0, target: 2, status: 302 },
       ],
     });
     expect(JSON.stringify(reports)).not.toMatch(/publisher\.org|hop-|secret|private|https?:|bytes|excerpt/);
-    expect(client.requests.filter(request => request.path.startsWith("/hop-"))).toHaveLength(8);
+    expect(client.requests.filter(request => request.path.startsWith("/hop-"))).toHaveLength(10);
     // A new request has a fresh budget and never inherits this request's trace.
     await expect(client.safeFetch("http://publisher.org/hop-2", "html", contextFixture())).resolves.toMatchObject({ status: 200 });
     expect(reports).toHaveLength(1);
@@ -70,21 +73,53 @@ describe("publisher budget diagnostics", () => {
   it("keeps a failing diagnostics sink from changing budget enforcement", async () => {
     const client = await setup(ordinary, { onBudgetExhausted: () => { throw new Error("diagnostics unavailable"); } });
     const ctx = contextFixture();
-    for (let index = 0; index < 8; index++) await client.safeFetch(`http://publisher.org/${index}`, "html", ctx);
-    await expect(client.safeFetch("http://publisher.org/ninth", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
-    expect(client.requests.filter(request => request.path !== "/robots.txt")).toHaveLength(8);
+    for (let index = 0; index < 12; index++) await client.safeFetch(`http://publisher.org/${index}`, "html", ctx);
+    await expect(client.safeFetch("http://publisher.org/thirteenth", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(client.requests.filter(request => request.path !== "/robots.txt")).toHaveLength(12);
   });
   it("uses the same HTTP target ID when a repeated fragment URL is rejected before dispatch", async () => {
     const reports: unknown[] = [];
     const client = await setup(ordinary, { onBudgetExhausted: report => reports.push(report) });
     const ctx = contextFixture();
-    for (let index = 0; index < 8; index++) await client.safeFetch("http://publisher.org/page#section", "html", ctx);
+    for (let index = 0; index < 12; index++) await client.safeFetch("http://publisher.org/page#section", "html", ctx);
     await expect(client.safeFetch("http://publisher.org/page#section", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
     expect(reports).toHaveLength(1);
     expect(reports[0]).toMatchObject({ blocked: { target: 2 }, attempts: [
-      { target: 1 }, { target: 2 }, { target: 2 }, { target: 2 }, { target: 2 },
-      { target: 2 }, { target: 2 }, { target: 2 }, { target: 2 },
+      { target: 1 }, ...Array.from({ length: 12 }, () => ({ target: 2 })),
     ] });
+  });
+  it("allows twelve HTML dispatches and rejects attempt thirteen", async () => {
+    const client = await setup(ordinary);
+    const ctx = contextFixture();
+    for (let index = 1; index <= 12; index++) {
+      await expect(client.safeFetch(`http://publisher.org/page-${index}`, "html", ctx)).resolves.toMatchObject({ status: 200 });
+    }
+    await expect(client.safeFetch("http://publisher.org/page-13", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(client.requests.filter(request => request.path !== "/robots.txt").map(request => request.path))
+      .toEqual(Array.from({ length: 12 }, (_, index) => `/page-${index + 1}`));
+  });
+  it("reserves the final two HTML attempts from licensed files for official corroboration", async () => {
+    const reports: unknown[] = [];
+    const client = await setup(ordinary, { onBudgetExhausted: report => reports.push(report) });
+    const ctx = { ...contextFixture(), publisherPhase: "identity" as const };
+    await client.safeFetch("http://publisher.org/identity-1", "html", ctx);
+    await client.safeFetch("http://publisher.org/identity-2", "html", ctx);
+    Object.assign(ctx, { publisherPhase: "licensed_category" });
+    await client.safeFetch("http://publisher.org/category", "html", ctx);
+    Object.assign(ctx, { publisherPhase: "licensed_file" });
+    for (let index = 1; index <= 7; index++) await client.safeFetch(`http://publisher.org/file-${index}`, "html", ctx);
+    await expect(client.safeFetch("http://publisher.org/file-8", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    Object.assign(ctx, { publisherPhase: "official_corroboration" });
+    await expect(client.safeFetch("http://publisher.org/corroboration", "html", ctx)).resolves.toMatchObject({ status: 200 });
+    await expect(client.safeFetch("http://publisher.org/corroboration-final", "html", ctx)).resolves.toMatchObject({ status: 200 });
+    await expect(client.safeFetch("http://publisher.org/page-13", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(client.requests.filter(request => request.path !== "/robots.txt").map(request => request.path)).toEqual([
+      "/identity-1", "/identity-2", "/category", "/file-1", "/file-2", "/file-3", "/file-4", "/file-5", "/file-6", "/file-7",
+      "/corroboration", "/corroboration-final",
+    ]);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ exhausted: "licensed_file_attempts", limit: 10,
+      dispatched: { html: 10, image: 0 }, blocked: { phase: "licensed_file" } });
   });
 });
 
@@ -282,12 +317,12 @@ describe("publisher access", () => {
     await client.safeFetch("http://publisher.org/b", "html", ctx);
     expect(client.requests.filter((request) => request.path === "/robots.txt")).toHaveLength(1);
   });
-  it("caps publisher pages at eight per run", async () => {
+  it("caps publisher pages at twelve per run", async () => {
     const client = await setup(ordinary);
     const ctx = contextFixture();
-    for (let index = 0; index < 8; index++) await client.safeFetch(`http://publisher.org/${index}`, "html", ctx);
-    await expect(client.safeFetch("http://publisher.org/ninth", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
-    expect(client.requests.some((request) => request.path === "/ninth")).toBe(false);
+    for (let index = 0; index < 12; index++) await client.safeFetch(`http://publisher.org/${index}`, "html", ctx);
+    await expect(client.safeFetch("http://publisher.org/thirteenth", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(client.requests.some((request) => request.path === "/thirteenth")).toBe(false);
   });
   it("does not follow a robots redirect into a publisher with an explicit prohibition", async () => {
     const client = await setup((_, response) => { response.writeHead(302, { location: "http://denied.org/robots.txt" }); response.end(); },
@@ -361,16 +396,15 @@ describe("publisher access", () => {
     });
     await expect(client.safeFetch("http://publisher.org/a", "html", contextFixture())).rejects.toMatchObject({ code: "access_denied" });
   });
-  it("counts redirected publisher page attempts in the eight-page ceiling", async () => {
+  it("counts redirected publisher page attempts in the twelve-page ceiling", async () => {
     const client = await setup((request, response) => {
       if (request.url === "/robots.txt" || request.url === "/hop-2") return ordinary(request, response);
       response.writeHead(302, { location: request.url === "/hop-0" ? "/hop-1" : "/hop-2" }); response.end();
     });
     const ctx = contextFixture();
-    await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
-    await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
+    for (let index = 0; index < 4; index++) await client.safeFetch("http://publisher.org/hop-0", "html", ctx);
     await expect(client.safeFetch("http://publisher.org/hop-0", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
-    expect(client.requests.filter((request) => request.path.startsWith("/hop-"))).toHaveLength(8);
+    expect(client.requests.filter((request) => request.path.startsWith("/hop-"))).toHaveLength(12);
   });
   it("honors Retry-After before a cross-origin redirect", async () => {
     const client = await setup((request, response) => {
