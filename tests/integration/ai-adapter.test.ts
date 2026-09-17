@@ -59,6 +59,24 @@ it("uses the real SDK with labelled inline bytes, strict schema, no tools or sto
   expect(requests[0].signal).toBeInstanceOf(AbortSignal);
   expect(reservations[0]).toBeGreaterThan(320); expect(settlements).toEqual([320]);
 });
+it("passes search context separately from parser evidence, with existing source bindings and redacted links", async () => {
+  const input = await inputFixture();
+  input.discoveryContext = [{ imageId: "image-one", evidenceId: "attribution-source", excerpt: "Search hint https://example.edu/path" }];
+  expect(await adapter().assess(input, contextFixture())).toMatchObject({ ok: true });
+  const serialized = JSON.stringify(requests[0].body);
+  expect(serialized).toContain("untrustedDiscoveryContext");
+  expect(serialized).toContain("Search hint [link omitted]");
+  expect(serialized).not.toContain("https://example.edu");
+  expect(String(requests[0].body.instructions)).toContain("not independent evidence");
+});
+it("rejects unbound or oversized search context before OpenAI dispatch", async () => {
+  const input = await inputFixture();
+  input.discoveryContext = [{ imageId: "image-one", evidenceId: "unfetched-source", excerpt: "Unverified claim" }];
+  expect(await adapter().assess(input, contextFixture())).toMatchObject({ ok: false, code: "invalid_request" });
+  input.discoveryContext = [{ imageId: "image-one", evidenceId: "attribution-source", excerpt: "x".repeat(601) }];
+  expect(await adapter().assess(input, contextFixture())).toMatchObject({ ok: false, code: "invalid_request" });
+  expect(requests).toHaveLength(0);
+});
 it("never logs media bytes or publisher excerpts even with OPENAI_LOG=debug", async () => {
   const previousLogLevel = process.env.OPENAI_LOG;
   const logged: unknown[][] = [];

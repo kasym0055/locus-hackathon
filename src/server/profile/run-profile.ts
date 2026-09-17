@@ -1,5 +1,5 @@
 import type { Emit } from "@/lib/events";
-import type { Evidence, FailureCode, ImageCardData, ProfileQuery, RunContext, University, Assessment } from "@/server/contracts";
+import type { Evidence, FailureCode, ImageCardData, ProfileQuery, RunContext, University, Assessment, AssessmentInput } from "@/server/contracts";
 import { failureSchema } from "@/lib/event-schema";
 import { decide } from "@/server/policy/decide";
 import { assembleProfile } from "./assemble";
@@ -35,6 +35,20 @@ export function failureCode(error: unknown, ctx?: RunContext): FailureCode {
   if (ctx?.signal.aborted) return "cancelled";
   const parsed = failureSchema.safeParse((error as { code?: unknown })?.code);
   return parsed.success ? parsed.data : "dependency_unavailable";
+}
+export function assessmentEvidence(evidence: Evidence[]): AssessmentInput["evidence"] {
+  const rows: AssessmentInput["evidence"] = [], seen = new Set<string>();
+  for (const item of evidence) {
+    const sources = [{ source: item.source, imageId: item.imageId, excerpt: item.excerpt },
+      ...(item.corroborationSources ?? []).filter(source => source.independent && source.locationSupported && source.imageId === item.imageId)];
+    for (const source of sources) {
+      if (seen.has(source.source.id) || source.source.policy.retention === "disallowed" || source.source.policy.display === "disallowed" || !source.excerpt.trim()) continue;
+      seen.add(source.source.id);
+      rows.push({ id: source.source.id, imageId: source.imageId, excerpt: source.excerpt.slice(0, 1200) });
+      if (rows.length === 48) return rows;
+    }
+  }
+  return rows;
 }
 export function createProfileRunner(services: ProfileServices) {
   return async (query: ProfileQuery, ctx: RunContext, emit: Emit, admitted = false): Promise<void> => {
@@ -73,7 +87,7 @@ export function createProfileRunner(services: ProfileServices) {
         await services.ledger.check(ctx); active();
         const result = await services.ai.assess({ images: [prepared.image], selectedUniversity: {
           name: university.name, campus: university.campus, city: university.city, country: university.country,
-        }, evidence: candidate.evidence.map(e => ({ id: e.source.id, imageId: e.imageId, excerpt: e.excerpt.slice(0, 1200) })) }, ctx);
+        }, evidence: assessmentEvidence(candidate.evidence) }, ctx);
         active();
         if (!result.ok) throw { code: result.code };
         if (candidate.policy.expiresAt && Date.parse(candidate.policy.expiresAt) <= Date.now()) throw { code: "policy_unknown" };

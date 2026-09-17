@@ -5,6 +5,9 @@ import { z } from "zod";
 const booleanSetting = z.enum(["true", "false"]).transform((value) => value === "true");
 
 const environment = z.object({
+  SEARCH_PROVIDER: z.enum(["brave", "tavily"]).default("brave"),
+  TAVILY_API_KEY: z.string().default(""),
+  TAVILY_VERIFIED_AVAILABLE_CREDITS: z.coerce.number().int().nonnegative().max(1_000_000).default(0),
   AI_MODEL: z.string().default("gpt-5.6-luna"),
   OPENAI_API_KEY: z.string().default(""),
   AI_ALLOWANCE_MICROUSD: z.coerce.number().int().positive().default(4_000_000),
@@ -27,6 +30,8 @@ const parsed = environment.parse(process.env);
 if (parsed.BRAVE_PAID_OVERAGE) throw new Error("Paid Brave overage is not supported");
 
 export const config = Object.freeze({
+  searchProvider: parsed.SEARCH_PROVIDER,
+  tavily: Object.freeze({ apiKey: parsed.TAVILY_API_KEY, verifiedAvailableCredits: parsed.TAVILY_VERIFIED_AVAILABLE_CREDITS }),
   ai: Object.freeze({
     model: parsed.AI_MODEL,
     apiKey: parsed.OPENAI_API_KEY,

@@ -4,11 +4,13 @@ import { createResolver } from "@/server/discovery/resolver";
 import { createDiscoveryPlanner } from "@/server/discovery/planner";
 import { createWikidataLookup } from "@/server/discovery/wikidata";
 import { createBraveSearch } from "@/server/discovery/brave";
+import { createTavilySearch } from "@/server/discovery/tavily";
+import { collectDiscoveryContext } from "@/server/discovery/context";
 import { httpUrl } from "@/server/discovery/http";
 import { safeFetch } from "@/server/fetch/safe-fetch";
 import { createImagePreparer, ImageFailure } from "@/server/images/prepare";
 import { createOpenAiAdapter } from "@/server/ai/openai";
-import type { UsagePolicy } from "@/server/contracts";
+import type { UsagePolicy, AiAdapter } from "@/server/contracts";
 import { policySchema } from "@/lib/event-schema";
 import { z } from "zod";
 import { documentedPolicyFor, mergePolicy } from "@/server/sources/usage-policy";
@@ -29,9 +31,18 @@ export function readPublisherPolicies(raw: string | undefined): ReadonlyMap<stri
   return result;
 }
 export function createProfileServices(options: { ledger: Ledger; apiKey: string; model: string; braveKey: string;
+  searchProvider?: "brave" | "tavily"; tavilyKey?: string;
   fetcher?: typeof safeFetch; providerFetch?: typeof fetch; policies?: ReadonlyMap<string, UsagePolicy> }) {
   const fetcher = options.fetcher ?? safeFetch;
-  const search = createBraveSearch({ apiKey: options.braveKey, ledger: options.ledger, fetch: options.providerFetch });
+  const discoveryContext = collectDiscoveryContext(options.searchProvider === "tavily"
+    ? createTavilySearch({ apiKey: options.tavilyKey ?? "", ledger: options.ledger, fetch: options.providerFetch })
+    : createBraveSearch({ apiKey: options.braveKey, ledger: options.ledger, fetch: options.providerFetch }));
+  const search = discoveryContext.search;
+  const adapter = createOpenAiAdapter({ apiKey: options.apiKey, model: options.model }, { ledger: options.ledger });
+  const ai: AiAdapter = { ...adapter, assess: (input, ctx) => {
+    const hints = discoveryContext.forEvidence(input.evidence, ctx);
+    return adapter.assess({ ...input, ...(hints.length ? { discoveryContext: hints } : {}) }, ctx);
+  } };
   const fetchPage = (url: string, ctx: Parameters<typeof safeFetch>[2]) => fetcher(url, "html", ctx);
   const prepare = async (candidate: Candidate, ctx: RunContext) => {
     let policy = candidate.policy, displayUrl = candidate.imageUrl;
@@ -61,12 +72,14 @@ export function createProfileServices(options: { ledger: Ledger; apiKey: string;
   return { ledger: options.ledger,
     resolve: createResolver({ lookup: createWikidataLookup({ fetch: options.providerFetch }), search, fetchPage }),
     discover: createDiscoveryPlanner({ search, fetchPage, publisherPolicies: options.policies }),
-    prepare, ai: createOpenAiAdapter({ apiKey: options.apiKey, model: options.model }, { ledger: options.ledger }) };
+    prepare, ai };
 }
 export type ProfileServices = ReturnType<typeof createProfileServices>;
 export async function productionServices(): Promise<ProfileServices> {
   const { config } = await import("@/server/config");
-  if (!config.ai.apiKey || !config.brave.apiKey || !process.env.CRAWLER_CONTACT_URL) throw new Error("dependency_unavailable");
+  const searchKey = config.searchProvider === "tavily" ? config.tavily.apiKey : config.brave.apiKey;
+  if (!config.ai.apiKey || !searchKey || !process.env.CRAWLER_CONTACT_URL) throw new Error("dependency_unavailable");
   return createProfileServices({ ledger: await productionLedger(), apiKey: config.ai.apiKey, model: config.ai.model, braveKey: config.brave.apiKey,
+    searchProvider: config.searchProvider, tavilyKey: config.tavily.apiKey,
     policies: readPublisherPolicies(process.env.PUBLISHER_POLICIES_JSON) });
 }

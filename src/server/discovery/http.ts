@@ -11,13 +11,14 @@ export function assertActive(ctx: RunContext) {
 
 // Fixed provider endpoints only. Publisher URLs always use the separate safe fetcher.
 export async function providerJson(fetcher: typeof fetch, url: URL, ctx: RunContext, headers: Record<string, string> = {},
-  diagnostic?: { kind: "web_search" | "image_search"; sink?: LocalTimeoutSink }): Promise<unknown> {
+  diagnostic?: { kind: "web_search" | "image_search"; sink?: LocalTimeoutSink }, body?: string): Promise<unknown> {
   assertActive(ctx);
   const duration = Math.max(1, Math.min(3_000, ctx.deadlineAt - Date.now()));
   const local = AbortSignal.timeout(duration);
   const signal = AbortSignal.any([ctx.signal, local]);
   try {
-    const response = await fetcher(url, { headers: { accept: "application/json", ...headers }, signal, redirect: "error", cache: "no-store" });
+    const response = await fetcher(url, { headers: { accept: "application/json", ...headers }, signal, redirect: "error", cache: "no-store",
+      ...(body === undefined ? {} : { method: "POST", body }) });
     if (!response.ok) { await response.body?.cancel(); throw new DiscoveryFailure("dependency_unavailable"); }
     if (!response.headers.get("content-type")?.includes("application/json") || !response.body) {
       await response.body?.cancel(); throw new DiscoveryFailure("invalid_provider_output");

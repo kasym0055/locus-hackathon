@@ -10,7 +10,7 @@ export type Pool = "development" | "acceptance" | "judging";
 export type BravePools = Record<Pool, number>;
 export interface Ledger {
   admit(ctx: RunContext): Promise<{ allowed: boolean; retryAfterSeconds: number }>;
-  reserve(ctx: RunContext, kind: "brave" | "ai", units: number): Promise<string>;
+  reserve(ctx: RunContext, kind: "brave" | "ai" | "tavily", units: number): Promise<string>;
   settle(reservationId: string, actualUnits: number | null): Promise<void>;
   release(requestId: string): Promise<void>;
   check(ctx: RunContext): Promise<void>;
@@ -21,7 +21,7 @@ export class LedgerFailure extends Error {
 }
 export interface LedgerOptions {
   namespace?: string; pool?: Pool; bravePools?: BravePools;
-  aiAllowanceMicrousd?: number; aiProfileCapMicrousd?: number;
+  aiAllowanceMicrousd?: number; aiProfileCapMicrousd?: number; tavilyAllowanceCredits?: number;
 }
 const script = readFileSync(new URL("./ledger.lua", import.meta.url), "utf8");
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -47,6 +47,7 @@ export function createLedger(evalScript: EvalScript, options: LedgerOptions = {}
   const prefix = `{${namespace}}:`;
   const pool = options.pool ?? "development";
   const pools = options.bravePools ?? allocateBravePools(0);
+  const tavilyAllowance = integer(options.tavilyAllowanceCredits ?? 0);
   const aiAllowance = integer(options.aiAllowanceMicrousd ?? 4_000_000);
   const aiProfileCap = integer(options.aiProfileCapMicrousd ?? 20_000);
   for (const amount of Object.values(pools)) integer(amount);
@@ -72,12 +73,12 @@ export function createLedger(evalScript: EvalScript, options: LedgerOptions = {}
     },
     async reserve(ctx, kind, units) {
       active(ctx); integer(units);
-      if (!units || !["ai", "brave"].includes(kind)) throw new LedgerFailure("invalid_request");
+      if (!units || !["ai", "brave", "tavily"].includes(kind)) throw new LedgerFailure("invalid_request");
       const reservationId = randomUUID();
       const aggregateKey = `${prefix}used:${kind}:${kind === "brave" ? pool : "all"}`;
       const requestKey = key(`request-used:${kind}`, ctx.requestId);
       const result = await execute([`${prefix}reservation:${reservationId}`, aggregateKey, requestKey, lease(ctx.requestId), activeKey, key("session", ctx.sessionId), `${prefix}reservation-meta:${reservationId}`],
-        ["reserve", units, kind === "brave" ? pools[pool] : aiAllowance, kind === "brave" ? 10 : aiProfileCap, hash(ctx.requestId)]);
+        ["reserve", units, kind === "brave" ? pools[pool] : kind === "tavily" ? tavilyAllowance : aiAllowance, kind === "brave" ? 10 : kind === "tavily" ? 4 : aiProfileCap, hash(ctx.requestId)]);
       if (result === -1) throw new LedgerFailure("busy");
       if (result === 0) throw new LedgerFailure("budget_exhausted");
       if (result !== 1) throw new LedgerFailure("dependency_unavailable");
@@ -115,6 +116,7 @@ export async function productionLedger(): Promise<Ledger> {
   const redis = new Redis({ url: config.redis.url, token: config.redis.token, retry: { retries: 0 },
     signal: () => AbortSignal.timeout(2_000), enableAutoPipelining: false });
   sharedLedger = createLedger((lua, keys, args) => redis.eval(lua, keys, args), {
+    tavilyAllowanceCredits: config.tavily.verifiedAvailableCredits,
     pool: config.brave.pool, bravePools: allocateBravePools(config.brave.verifiedAvailableCalls),
     aiAllowanceMicrousd: config.ai.allowanceMicrousd, aiProfileCapMicrousd: config.ai.profileCapMicrousd,
   });

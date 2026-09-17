@@ -4,9 +4,8 @@ import type { Ledger } from "@/server/usage/ledger";
 import { assertActive, DiscoveryFailure, httpUrl, providerJson } from "./http";
 import type { LocalTimeoutSink } from "./timeout-diagnostics";
 
-export interface SearchInput { query: string; kind: "web" | "images" }
-export interface DiscoveryRecord { pageUrl: string; imageUrl?: string; policy: UsagePolicy }
-export type Search = (input: SearchInput, ctx: RunContext) => Promise<DiscoveryRecord[]>;
+import type { SearchInput, DiscoveryRecord, Search } from "./search";
+export type { SearchInput, DiscoveryRecord, Search } from "./search";
 const url = z.string().refine(httpUrl);
 const webSchema = z.object({ type: z.literal("search"), web: z.object({ results: z.array(z.object({ url, is_offensive: z.boolean().optional() })).max(100) }).optional() });
 const imageSchema = z.object({ type: z.literal("images"), results: z.array(z.object({ url: url.nullable(), properties: z.object({ url: url.nullable() }).nullable(), is_offensive: z.boolean().optional() })).max(200) });

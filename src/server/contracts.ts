@@ -102,6 +102,7 @@ export interface Decision {
 export interface AssessmentInput {
   images: ValidatedImage[];
   evidence: Array<{ id: string; imageId: string; excerpt: string }>;
+  discoveryContext?: Array<{ evidenceId: string; imageId: string; excerpt: string }>;
   selectedUniversity?: Pick<University, "name" | "campus" | "city" | "country">;
 }
 export interface AiUsage { inputTokens: number; outputTokens: number; costMicrousd: number }
