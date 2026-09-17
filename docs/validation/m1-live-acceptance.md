@@ -265,3 +265,42 @@ run exactly one fresh NU request, and capture the matching runtime logs promptly
 Both incidents can close only when the live request reaches preparing, assessing,
 and a real OpenAI call. Later-stage failures must be investigated separately.
 M1 remains open; Task 6 must not start.
+
+## Official-origin diversity follow-up (2026-09-17)
+
+The operator supplied two `publisher_access_denied` events for Production request
+`fc011b6d-b86b-4a42-82ab-9dd857ca9cfc`. Both were HTML `robots_policy` denials in
+`official_corroboration`, with origin ID 1 and target IDs 1 and 2. The bounded
+two-page fallback ran, but both candidates came from the same origin. This is
+not evidence of HTML-budget exhaustion or an origin-wide robots prohibition.
+
+The planner now orders already-validated official search results in two passes:
+the first unvisited candidate from each origin, then a second candidate from each
+origin. Search ranking is preserved within each pass. Duplicate targets are
+removed. At most three candidates per object and two per origin can be inspected;
+valid corroboration ends inspection immediately. Existing per-object tracking
+prevents a later licensed file from restarting the allowance. Same-origin paths
+remain eligible, with each access decision delegated to the existing safe fetcher.
+
+Only planner ordering changes. All transport, robots, SSRF, publisher/license,
+deadline, provider-budget and deterministic verification rules remain unchanged,
+including the 12-HTML limit, licensed-file ceiling/reservation, image and
+policy-origin limits, and eight-page planner visitation bound. Socket-backed
+regressions cover origin diversity, first-source success, path-specific denial,
+all three candidates denied without a fourth attempt, malicious lookalike domains,
+the two-per-origin bound, and rejecting HTML attempt 13.
+
+Verification passed: 26 focused discovery tests, 78 isolated safe-fetch tests,
+typecheck, lint, production build and diff checks. Full verification via
+`node node_modules/vitest/vitest.mjs run --maxWorkers=1` on system Node 24.15.0
+passed all 15 files: 330 tests passed and eight existing Redis-dependent tests
+were skipped. Earlier invocations through bundled Node 24.19.0 hit the previously
+observed Windows native worker exits in safe-fetch/profile-route; a threads-pool
+attempt also exited unsuccessfully. No application or runner configuration was
+changed, and no assertion was relaxed to obtain the complete passing run.
+
+Stop after push for operator Production promotion. No new NU request was issued
+for this patch. After promotion, verify the deployed commit, run exactly one NU
+request, and promptly capture its stages, latency, warnings, denial/budget events,
+OpenAI call count and final status. Discovery/corroboration remains open until
+preparation, assessment and a real OpenAI call are confirmed. Task 6 must not start.

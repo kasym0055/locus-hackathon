@@ -125,11 +125,19 @@ export function createDiscoveryPlanner(dependencies: { fetchPage?: PageFetcher; 
       for (const domain of university.officialDomains.slice(0, 1)) {
         const query = `site:${domain} "${term}" ${university.name}`.slice(0, 400);
         const results = await search({ query, kind: "web" }, ctx);
-        let attempts = 0;
+        const distinct: typeof results = [], repeated: typeof results = [];
+        const origins = new Map<string, number>(), targets = new Set(visited);
         for (const result of results) {
-          if (attempts >= 2) break;
-          if (!httpUrl(result.pageUrl) || !official(result.pageUrl) || visited.has(result.pageUrl)) continue;
-          attempts++;
+          if (!httpUrl(result.pageUrl) || !official(result.pageUrl) || targets.has(result.pageUrl)) continue;
+          targets.add(result.pageUrl);
+          const origin = new URL(result.pageUrl).origin, count = origins.get(origin) ?? 0;
+          if (count >= 2) continue;
+          origins.set(origin, count + 1);
+          (count === 0 ? distinct : repeated).push(result);
+        }
+        // Preserve search rank within each pass. Diversity is a preference, not
+        // an origin ban: another path may pass the unchanged access-policy gate.
+        for (const result of [...distinct, ...repeated].slice(0, 3)) {
           retainOfficialSupport(await inspect(result.pageUrl, result.policy, undefined, "official_corroboration"));
           if (candidates.some(candidate => candidateObject(candidate) === object
             && corroborate(candidate).evidence[0]?.independentEquivalent)) return;

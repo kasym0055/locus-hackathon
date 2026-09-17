@@ -238,16 +238,21 @@ describe("publisher-first discovery", () => {
     expect(candidate.evidence[0]).toMatchObject({ authority: "attributable", association: "explicit",
       corroboration: 20, independentEquivalent: true });
   });
-  it.each(["denied-first", "irrelevant-first", "both-denied", "both-irrelevant", "first-supports"] as const)(
-    "bounds official corroboration to two permitted-domain candidates: %s", async mode => {
+  it.each(["denied-first", "irrelevant-first", "both-denied", "both-irrelevant", "first-supports",
+    "diverse-success", "diverse-first-supports", "diverse-all-denied"] as const)(
+    "bounds official corroboration and prefers distinct origins: %s", async mode => {
+      const diverse = mode.startsWith("diverse-");
+      const firstSupports = mode === "first-supports" || mode === "diverse-first-supports";
+      const allDenied = mode === "both-denied" || mode === "diverse-all-denied";
+      const firstDenied = mode === "denied-first" || mode === "diverse-success" || allDenied;
       const filePath = "/wiki/File:Campus_atrium.jpg";
       const original = "https://upload.wikimedia.org/commons/atrium.jpg";
       const officialAttempts: string[] = [], searches: string[] = [];
       const transport = await transportFixture((request, response) => {
         if (request.url === "/robots.txt") {
           response.writeHead(200, { "content-type": "text/plain" });
-          response.end(request.headers.host === "example.edu"
-            ? `User-agent: *\n${mode === "denied-first" || mode === "both-denied" ? "Disallow: /first\n" : ""}${mode === "both-denied" ? "Disallow: /second\n" : ""}`
+          response.end(request.headers.host === "example.edu" || request.headers.host === "research.example.edu"
+            ? `User-agent: *\n${firstDenied ? "Disallow: /first\n" : ""}${allDenied ? "Disallow: /second\nDisallow: /third\n" : ""}`
             : "User-agent: *\nAllow: /\n"); return;
         }
         response.writeHead(200, { "content-type": "text/html" });
@@ -259,7 +264,7 @@ describe("publisher-first discovery", () => {
             <tr><td id="fileinfotpl_aut">Author</td><td>Fixture Photographer</td></tr></table>
             <span class="licensetpl_short">CC BY-SA 4.0</span><span class="licensetpl_link">https://creativecommons.org/licenses/by-sa/4.0/</span>`);
         } else {
-          const supports = mode !== "both-irrelevant" && (request.url !== "/first" || mode === "first-supports");
+          const supports = mode !== "both-irrelevant" && (request.url !== "/first" || firstSupports);
           response.end(`<figure><img src="/photo.jpg"><figcaption>${supports ? "Our main atrium welcomes visitors." : "Our sports field welcomes visitors."}</figcaption></figure>`);
         }
       });
@@ -279,23 +284,30 @@ describe("publisher-first discovery", () => {
           search: async input => {
             if (input.kind !== "web") return [];
             searches.push(input.query);
-            return ["https://example.edu/first", "https://outsider.org/first", "https://example.edu.attacker.org/second",
-              "https://example.edu/second", "https://example.edu/third"]
+            return ["https://example.edu/first", "https://outsider.org/first", "https://example.edu.attacker.com/second",
+              "https://attacker-example.edu/first", "https://example.edu/second",
+              ...(diverse ? ["https://research.example.edu/third"] : []),
+              "https://example.edu/third", "https://research.example.edu/fourth"]
+              .filter(url => diverse || !url.includes("research.example.edu"))
               .map(pageUrl => ({ pageUrl, policy: { ...grant("brave"), display: "link_only" as const } }));
           },
           publisherPolicies: new Map(["https://commons.wikimedia.org", "https://upload.wikimedia.org"].map(origin => [origin, grant(origin)])),
         });
         const result = await discover(universityFixture(), ["campus"], ctx).catch(error => error);
-        expect(officialAttempts).toEqual(mode === "first-supports" ? ["https://example.edu/first"]
+        expect(officialAttempts).toEqual(firstSupports ? ["https://example.edu/first"]
+          : diverse ? ["https://example.edu/first", "https://research.example.edu/third",
+            ...(allDenied ? ["https://example.edu/second"] : [])]
           : ["https://example.edu/first", "https://example.edu/second"]);
         expect(searches).toEqual(['site:example.edu "atrium" Example University']);
         const paths = transport.requests.filter(request => request.host === "example.edu").map(request => request.path);
-        expect(paths).toEqual(mode === "both-denied" ? ["/robots.txt"] : mode === "denied-first"
-          ? ["/robots.txt", "/second"] : mode === "first-supports" ? ["/robots.txt", "/first"] : ["/robots.txt", "/first", "/second"]);
+        expect(paths).toEqual(allDenied || mode === "diverse-success" ? ["/robots.txt"] : mode === "denied-first"
+          ? ["/robots.txt", "/second"] : firstSupports ? ["/robots.txt", "/first"] : ["/robots.txt", "/first", "/second"]);
+        expect(transport.requests.filter(request => request.host === "research.example.edu").map(request => request.path))
+          .toEqual(!diverse || firstSupports ? [] : allDenied ? ["/robots.txt"] : ["/robots.txt", "/third"]);
         expect(transport.requests.some(request => request.host?.includes("outsider") || request.host?.includes("attacker"))).toBe(false);
-        if (mode === "both-denied" || mode === "both-irrelevant") {
-          // Subsequent files for the same object must not restart the two-page allowance.
-          if (mode === "both-denied") expect(result).toMatchObject({ code: "access_denied" });
+        if (allDenied || mode === "both-irrelevant") {
+          // Subsequent files for the same object must not restart the bounded allowance.
+          if (allDenied) expect(result).toMatchObject({ code: "access_denied" });
           else {
             expect(result).toHaveLength(1);
             expect(result[0].evidence[0]).toMatchObject({ independentEquivalent: false, corroboration: 0 });
@@ -303,8 +315,8 @@ describe("publisher-first discovery", () => {
         } else {
           expect(result[0]).toMatchObject({ imageUrl: original, evidence: [expect.objectContaining({
             association: "explicit", independentEquivalent: true, corroboration: 20,
-            corroborationSources: [expect.objectContaining({ source: expect.objectContaining({ url: mode === "first-supports"
-              ? "https://example.edu/first" : "https://example.edu/second" }), independent: true })],
+            corroborationSources: [expect.objectContaining({ source: expect.objectContaining({ url: firstSupports
+              ? "https://example.edu/first" : diverse ? "https://research.example.edu/third" : "https://example.edu/second" }), independent: true })],
           })] });
         }
         if (mode === "irrelevant-first") {
