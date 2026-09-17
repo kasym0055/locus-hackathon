@@ -87,8 +87,12 @@ function hasOfficialContact($: CheerioAPI, domain: string, city: string, country
   }
   return [...scopes].some((text) => {
     const location = text.includes(normalizeQuery(city)) && text.includes(normalizeQuery(country));
-    const email = text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/giu)
-      ?.some((address) => { const host = address.split("@").at(-1)?.toLowerCase(); return host === domain || host?.endsWith(`.${domain}`); });
+    const email = text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+(?:@|\s*(?:\(\s*at\s*\)|\[\s*at\s*\])\s*)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/giu)
+      ?.some((address) => {
+        const canonical = address.replace(/\s*(?:\(\s*at\s*\)|\[\s*at\s*\])\s*/iu, "@");
+        const host = canonical.split("@").at(-1)?.toLowerCase();
+        return host === domain || host?.endsWith(`.${domain}`);
+      });
     return location && email === true;
   });
 }
