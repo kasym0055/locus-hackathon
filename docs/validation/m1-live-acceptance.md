@@ -178,3 +178,50 @@ prior default-concurrency suite run ended in the known intermittent Windows
 worker fast-fail (`0xC0000409`) without an assertion. The affected 51-test file
 passed alone, and the complete bounded-worker rerun passed, so no application or
 runner configuration was changed for that environmental failure.
+
+## Access-denial diagnostic handoff (2026-09-17)
+
+Production commit `746bee92b21aa7d0234e8c4c1ccad05ff7e926d5` was verified by
+`x-locus-commit`. Exactly one fresh NU profile request,
+`95435d96-8299-451f-93a9-4a5dafa2bcc1`, returned HTTP 200 and a terminal
+`insufficient_evidence` result with `access_denied` during discovery. Server
+latency was 9,359 ms (9,818 ms client latency). Neither preparation nor assessment
+was reached: zero OpenAI calls, zero OpenAI spend, and no card. The response had
+no publisher-budget warning. Its runtime logs expired before retrieval, so the
+precise denied fetch remains unknown. The HTML-budget incident has not met its
+live closure criterion of preparation plus a real OpenAI call.
+
+The diagnostic-only follow-up emits `publisher_access_denied` from existing
+safe-fetch denial branches. Each request can emit at most 16 reports. The sink
+receives only request ID, phase, fetch kind, redirect hop, request-local numeric
+origin/target IDs, denial category, HTTP status when available at the rejection
+point, retry-time presence and bounded relative milliseconds, and elapsed time.
+Retry duration is clamped to zero through 24 hours; no absolute retry timestamp
+is logged. No URL, hostname, query, publisher content, credentials, image bytes,
+or personal data enters the log payload.
+
+Access-denial IDs describe only denied targets and are independent of the
+existing budget-event IDs. Both ID maps and report count are request-local and
+bounded to 16. A robots transport rejection and the consequent content denial
+can emit separate records. A direct `checkAccess` call is marked `kind=robots`
+because it checks policy without dispatching content; its target ID identifies
+the checked URL. A policy rejection before content dispatch has no content HTTP
+status. `preflight_policy` includes configured publisher prohibitions and cached
+origin backoff; `robots_policy` covers the access-policy gate. Other categories
+are `crawl_pacing`, `retry_after`, `http_status`, `x_robots_tag`, and `meta_robots`.
+
+Diagnostics are never awaited. Synchronous sink exceptions and asynchronous
+rejections are contained, preserving the original transport failure and cleanup.
+Socket-backed tests cover every required denial category, redirect hops, repeated
+target IDs, report bounds, failing sinks, direct policy checks, and coexistence
+with the unchanged twelve-HTML-dispatch ceiling and rejection of attempt 13.
+The full suite passed 322 tests with eight existing Redis-dependent tests skipped
+under `--maxWorkers=1`; typecheck, lint, and the production build passed.
+
+No access decision, robots rule, fetch order, fetch/provider budget, license
+policy, SSRF protection, image behavior, deterministic verification rule, or
+27-second deadline was changed. No new NU Production request was issued for this
+patch. After pushing, stop for operator Production promotion. Only after the
+diagnostic commit is Production may the next single NU acceptance request run;
+capture its matching events before the Hobby log-retention window expires.
+M1 remains open. Task 6 must not start.

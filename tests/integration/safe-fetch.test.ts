@@ -18,6 +18,107 @@ const ordinary: Parameters<typeof transportFixture>[0] = (request, response) => 
   else { response.writeHead(200, { "content-type": "text/html" }); response.end("<h1>Publisher</h1>"); }
 };
 
+describe("publisher access denial diagnostics", () => {
+  it.each([
+    { mode: "robots", source: "robots_policy", status: undefined },
+    { mode: "status", source: "http_status", status: 403 },
+    { mode: "retry", source: "retry_after", status: 429 },
+    { mode: "header", source: "x_robots_tag", status: 200 },
+    { mode: "meta", source: "meta_robots", status: 200 },
+  ])("identifies $mode denial without exposing publisher data", async ({ mode, source, status }) => {
+    const reports: unknown[] = [];
+    const client = await setup((request, response) => {
+      if (request.url === "/robots.txt") {
+        if (mode !== "robots") return ordinary(request, response);
+        response.writeHead(200, { "content-type": "text/plain" }); response.end("User-agent: *\nDisallow: /\n"); return;
+      }
+      response.writeHead(status!, { "content-type": "text/html", "set-cookie": "private-cookie",
+        ...(mode === "retry" ? { "retry-after": "120" } : {}),
+        ...(mode === "header" ? { "x-robots-tag": "noimageai" } : {}) });
+      response.end(mode === "meta" ? '<meta name="robots" content="noai">private-body' : "private-body");
+    }, { onAccessDenied: report => { reports.push(report); } });
+    const ctx = { ...contextFixture(), publisherPhase: "official_corroboration" as const };
+    const failure = await client.safeFetch("http://publisher.org/private-path?key=private-query", "html", ctx).catch(error => error);
+    expect(failure.code).toBe("access_denied");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toEqual({ event: "publisher_access_denied", requestId: ctx.requestId,
+      phase: "official_corroboration", kind: "html", hop: 0, origin: 1, target: 1,
+      source, ...(status === undefined ? {} : { status }), retryAtPresent: mode === "retry",
+      ...(mode === "retry" ? { retryAfterMs: expect.any(Number) } : {}), elapsedMs: expect.any(Number) });
+    if (mode === "retry") {
+      expect(failure.retryAt).toBeGreaterThan(Date.now());
+      expect(reports[0]).toMatchObject({ retryAfterMs: expect.any(Number) });
+    }
+    expect(JSON.stringify(reports)).not.toMatch(/publisher\.org|private-|https?:|cookie|authorization|bytes/i);
+    expect(client.requests.map(request => request.path)).toEqual(mode === "robots"
+      ? ["/robots.txt"] : ["/robots.txt", "/private-path?key=private-query"]);
+  });
+  it("reports the denied redirect destination and reuses request-local target IDs", async () => {
+    const reports: unknown[] = [];
+    const client = await setup((request, response) => {
+      if (request.url === "/robots.txt") return ordinary(request, response);
+      response.writeHead(request.url === "/start" ? 302 : 403, { location: "http://destination.org/denied" }); response.end();
+    }, { onAccessDenied: report => { reports.push(report); } });
+    const ctx = contextFixture();
+    await expect(client.safeFetch("http://publisher.org/start", "image", ctx)).rejects.toMatchObject({ code: "access_denied" });
+    await expect(client.safeFetch("http://destination.org/denied", "image", ctx)).rejects.toMatchObject({ code: "access_denied" });
+    expect(reports).toMatchObject([
+      { kind: "image", hop: 1, origin: 1, target: 1, source: "http_status", status: 403 },
+      { kind: "image", hop: 0, origin: 1, target: 1, source: "http_status", status: 403 },
+    ]);
+  });
+  it("logs robots Retry-After and the blocked content without dispatching content", async () => {
+    const reports: unknown[] = [];
+    const client = await setup((_, response) => { response.writeHead(503, { "retry-after": "60" }); response.end(); },
+      { onAccessDenied: report => { reports.push(report); } });
+    expect(await client.checkAccess("http://publisher.org/page", contextFixture())).toMatchObject({ allowed: false, reason: "access_denied" });
+    expect(reports).toMatchObject([
+      { kind: "robots", status: 503, source: "retry_after", retryAtPresent: true },
+      { kind: "robots", source: "robots_policy", retryAtPresent: true },
+    ]);
+    expect(client.requests.map(request => request.path)).toEqual(["/robots.txt"]);
+  });
+  it("reports a direct access-policy check denial while preserving its result", async () => {
+    const reports: unknown[] = [];
+    const client = await setup((_, response) => {
+      response.writeHead(200, { "content-type": "text/plain" }); response.end("User-agent: *\nDisallow: /\n");
+    }, { onAccessDenied: report => { reports.push(report); } });
+    const ctx = contextFixture();
+    expect(await client.checkAccess("http://publisher.org/page", ctx)).toEqual({ allowed: false, reason: "access_denied" });
+    expect(reports).toMatchObject([{ requestId: ctx.requestId, source: "robots_policy", hop: 0 }]);
+    expect(client.requests.map(request => request.path)).toEqual(["/robots.txt"]);
+  });
+  it("leaves dispatch budgets and budget diagnostics intact when access logging is enabled", async () => {
+    const denied: unknown[] = [], budgets: unknown[] = [];
+    const client = await setup((request, response) => {
+      if (request.url === "/robots.txt") return ordinary(request, response);
+      response.writeHead(403); response.end();
+    }, { onAccessDenied: report => { denied.push(report); }, onBudgetExhausted: report => budgets.push(report) });
+    const ctx = contextFixture();
+    for (let index = 0; index < 12; index++) {
+      await expect(client.safeFetch("http://publisher.org/denied", "html", ctx)).rejects.toMatchObject({ code: "access_denied" });
+    }
+    await expect(client.safeFetch("http://publisher.org/denied", "html", ctx)).rejects.toMatchObject({ code: "budget_exhausted" });
+    expect(denied).toHaveLength(12);
+    expect(budgets).toMatchObject([{ exhausted: "html_attempts", limit: 12, dispatched: { html: 12, image: 0, robots: 1 } }]);
+    expect(client.requests).toHaveLength(13);
+  });
+  it.each([false, true])("bounds reports per request even when the sink fails (async=%s)", async asyncSink => {
+    let calls = 0;
+    const client = await setup(ordinary, { publisherRules: new Map([["http://publisher.org", { crawl: "deny" }]]),
+      onAccessDenied: () => { calls++; if (asyncSink) return Promise.reject(new Error("sink failed")); throw new Error("sink failed"); } });
+    const ctx = contextFixture();
+    for (let index = 0; index < 20; index++) {
+      await expect(client.safeFetch(`http://publisher.org/${index}`, "html", ctx)).rejects.toMatchObject({ code: "access_denied" });
+    }
+    expect(calls).toBe(16);
+    await expect(client.safeFetch("http://publisher.org/new-request", "html", contextFixture())).rejects.toMatchObject({ code: "access_denied" });
+    expect(calls).toBe(17);
+    await expect(client.safeFetch("http://allowed.org/page", "html", ctx)).resolves.toMatchObject({ status: 200 });
+    expect(client.requests.map(request => request.host)).toEqual(["allowed.org", "allowed.org"]);
+  });
+});
+
 describe("publisher budget diagnostics", () => {
   it("reports the first blocked redirect and exact dispatch sequence across pipeline phases without retaining URLs", async () => {
     const reports: unknown[] = [];

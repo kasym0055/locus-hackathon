@@ -25,12 +25,21 @@ export interface PublisherBudgetReport {
   dispatched: Record<FetchKind, number>; attempts: FetchAttempt[];
   blocked: Omit<FetchAttempt, "ordinal" | "durationMs" | "status" | "failure">;
 }
+export interface PublisherAccessDeniedReport {
+  event: "publisher_access_denied";
+  requestId: string; phase: FetchAttempt["phase"]; kind: FetchKind; hop: number;
+  origin: number; target: number; status?: number;
+  source: "preflight_policy" | "robots_policy" | "crawl_pacing" | "retry_after"
+    | "http_status" | "x_robots_tag" | "meta_robots";
+  retryAtPresent: boolean; retryAfterMs?: number; elapsedMs: number;
+}
 export interface FetchDependencies {
   resolve?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
   connect?: buildConnector.connector;
   contactUrl?: string;
   publisherRules?: ReadonlyMap<string, PublisherRule>;
   onBudgetExhausted?: (report: PublisherBudgetReport) => void;
+  onAccessDenied?: (report: PublisherAccessDeniedReport) => void | Promise<void>;
 }
 
 export class FetchFailure extends Error {
@@ -124,6 +133,36 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
   const resolve = dependencies.resolve ?? ((hostname: string) => lookup(hostname, { all: true, verbatim: true }));
   const connect = dependencies.connect ?? buildConnector({ rejectUnauthorized: true, allowH2: false, timeout: 3_000 });
   const counts = new WeakMap<RunContext, { html: number; image: number }>();
+  // Separate from budget traces: at most 16 reports, origins and targets per run.
+  // IDs describe denial targets only and restart for each request; no stable hashes.
+  const denials = new WeakMap<RunContext, { count: number; origins: Map<string, number>; targets: Map<string, number> }>();
+  function reportDenial(owner: RunContext, ctx: RunContext, url: URL, kind: FetchKind, hop: number,
+    source: PublisherAccessDeniedReport["source"], retryAt?: number, status?: number) {
+    if (!dependencies.onAccessDenied) return;
+    try {
+      let trace = denials.get(owner);
+      if (!trace) { trace = { count: 0, origins: new Map(), targets: new Map() }; denials.set(owner, trace); }
+      if (trace.count >= 16) return;
+      trace.count++;
+      if (!trace.origins.has(url.origin)) trace.origins.set(url.origin, trace.origins.size + 1);
+      if (!trace.targets.has(url.href)) trace.targets.set(url.href, trace.targets.size + 1);
+      const now = Date.now();
+      const report: PublisherAccessDeniedReport = { event: "publisher_access_denied", requestId: owner.requestId,
+        phase: ctx.publisherPhase ?? "unspecified", kind, hop, source,
+        origin: trace.origins.get(url.origin)!, target: trace.targets.get(url.href)!,
+        ...(status === undefined ? {} : { status }), retryAtPresent: retryAt !== undefined,
+        ...(Number.isFinite(retryAt) ? { retryAfterMs: Math.min(86_400_000, Math.max(0, retryAt! - now)) } : {}),
+        elapsedMs: Math.max(0, now - owner.startedAt) };
+      // Never await diagnostics or allow synchronous/asynchronous sink failures
+      // to replace the transport result or interfere with socket cleanup.
+      void Promise.resolve(dependencies.onAccessDenied(report)).catch(() => {});
+    } catch { /* diagnostics only */ }
+  }
+  function accessFailure(owner: RunContext, ctx: RunContext, url: URL, kind: FetchKind, hop: number,
+    source: PublisherAccessDeniedReport["source"], code: FailureCode = "access_denied", retryAt?: number, status?: number) {
+    if (code === "access_denied") reportDenial(owner, ctx, url, kind, hop, source, retryAt, status);
+    return new FetchFailure(code, retryAt);
+  }
   // Request-local numeric IDs preserve repeated targets/redirects without logging
   // URLs, queries, publisher content, credentials, or stable target fingerprints.
   const traces = new WeakMap<RunContext, { attempts: FetchAttempt[]; origins: Map<string, number>; targets: Map<string, number>; reported: boolean }>();
@@ -164,12 +203,12 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
   async function rawFetch(value: string, kind: FetchKind, ctx: RunContext, owner: RunContext = ctx): Promise<FetchResult> {
     let url = validateUrl(value);
     const redirectUrls: string[] = [];
-    if (!policy.userAgent) throw new FetchFailure("access_denied");
+    if (!policy.userAgent) throw accessFailure(owner, ctx, url, kind, 0, "preflight_policy");
     for (let redirects = 0; ; redirects++) {
       assertActive(ctx);
       url = validateUrl(url.href);
       const permission = policy.preflight(url.href);
-      if (!permission.allowed) throw new FetchFailure(permission.reason ?? "access_denied", permission.retryAt);
+      if (!permission.allowed) throw accessFailure(owner, ctx, url, kind, redirects, "preflight_policy", permission.reason, permission.retryAt);
       if (kind === "robots") {
         // Charge redirected policy origins without recursively checking robots.
         const allowance = policy.claimOrigin(url.href, owner);
@@ -178,7 +217,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
       } else {
         const access = await policy.checkAccess(url.href, ctx, owner);
         if (!access.allowed) throw access.reason === "budget_exhausted"
-          ? budgetFailure(owner, ctx, url, kind, redirects, "policy_origins") : new FetchFailure(access.reason ?? "access_denied", access.retryAt);
+          ? budgetFailure(owner, ctx, url, kind, redirects, "policy_origins") : accessFailure(owner, ctx, url, kind, redirects, "robots_policy", access.reason, access.retryAt);
       }
       const hostname = url.hostname.replace(/^\[|\]$/g, "");
       const addresses = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await withAbort(resolve(hostname), ctx.signal);
@@ -195,7 +234,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
       try {
         assertActive(ctx);
         const pacing = await policy.waitForStart(url.href, ctx);
-        if (!pacing.allowed) throw new FetchFailure(pacing.reason ?? "access_denied", pacing.retryAt);
+        if (!pacing.allowed) throw accessFailure(owner, ctx, url, kind, redirects, "crawl_pacing", pacing.reason, pacing.retryAt);
         if (kind !== "robots") {
           const count = counts.get(owner) ?? { html: 0, image: 0 };
           counts.set(owner, count);
@@ -222,15 +261,15 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
         body.on("error", () => {});
         const header = (key: string) => { const value = response.headers[key]; return Array.isArray(value) ? value.join(",") : value ?? ""; };
         policy.noteResponse(url.href, response.statusCode, header("retry-after"));
-        if (header("retry-after")) throw new FetchFailure("access_denied", policy.preflight(url.href).retryAt);
+        if (header("retry-after")) throw accessFailure(owner, ctx, url, kind, redirects, "retry_after", "access_denied", policy.preflight(url.href).retryAt, response.statusCode);
         if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
           if (redirects >= 3 || !header("location")) throw new FetchFailure("protocol_error");
           url = validateUrl(new URL(header("location"), url).href);
           redirectUrls.push(url.href);
           continue;
         }
-        if (kind !== "robots" && (response.statusCode < 200 || response.statusCode >= 300 || header("retry-after"))) throw new FetchFailure("access_denied", policy.preflight(url.href).retryAt);
-        if (/(?:^|[\s,:])(?:none|noai|noimageai|noimageindex)(?:$|[\s,])/i.test(header("x-robots-tag"))) throw new FetchFailure("access_denied");
+        if (kind !== "robots" && (response.statusCode < 200 || response.statusCode >= 300 || header("retry-after"))) throw accessFailure(owner, ctx, url, kind, redirects, "http_status", "access_denied", policy.preflight(url.href).retryAt, response.statusCode);
+        if (/(?:^|[\s,:])(?:none|noai|noimageai|noimageindex)(?:$|[\s,])/i.test(header("x-robots-tag"))) throw accessFailure(owner, ctx, url, kind, redirects, "x_robots_tag", "access_denied", undefined, response.statusCode);
         const contentType = header("content-type").toLowerCase();
         if (kind === "html" && !/^(text\/html|application\/xhtml\+xml)(?:;|$)/.test(contentType)) throw new FetchFailure("invalid_media");
         if (kind === "image" && !/^image\/(jpeg|png|webp)(?:;|$)/.test(contentType)) throw new FetchFailure("invalid_media");
@@ -240,7 +279,7 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
           const restrictions = $("meta[name]").toArray()
             .filter((element) => ["robots", "visualuniversityprofile"].includes(($(element).attr("name") ?? "").toLowerCase()))
             .map((element) => $(element).attr("content") ?? "").join(",");
-          if (/(?:^|[\s,])(?:none|noai|noimageai|noimageindex)(?:$|[\s,])/i.test(restrictions)) throw new FetchFailure("access_denied");
+          if (/(?:^|[\s,])(?:none|noai|noimageai|noimageindex)(?:$|[\s,])/i.test(restrictions)) throw accessFailure(owner, ctx, url, kind, redirects, "meta_robots", "access_denied", undefined, response.statusCode);
         }
         return { finalUrl: url.href, redirectUrls, contentType, bytes, status: response.statusCode, retrievedAt: new Date().toISOString() };
       } catch (error) {
@@ -275,7 +314,16 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
     return bounded(ctx, (boundedContext) => rawFetch(url, kind, boundedContext, ctx));
   }
   async function checkAccess(url: string, ctx: RunContext): Promise<AccessResult> {
-    try { validateUrl(url); return await bounded(ctx, (boundedContext) => policy.checkAccess(url, boundedContext, ctx)); }
+    try {
+      validateUrl(url);
+      const result = await bounded(ctx, (boundedContext) => policy.checkAccess(url, boundedContext, ctx));
+      // This public method performs only a robots/access-policy check; it does
+      // not dispatch content or know whether its caller intends HTML or an image.
+      if (!result.allowed && result.reason === "access_denied") {
+        reportDenial(ctx, ctx, validateUrl(url), "robots", 0, "robots_policy", result.retryAt);
+      }
+      return result;
+    }
     catch (error) { return { allowed: false, reason: error instanceof FetchFailure ? error.code : "access_denied" }; }
   }
   return { safeFetch, checkAccess };
@@ -284,5 +332,6 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
 // A real project-owned HTTPS contact URL must be configured by the operator.
 // No placeholder identity or route-controlled transport configuration is provided.
 export const defaultFetcher = createSafeFetcher({ contactUrl: process.env.CRAWLER_CONTACT_URL,
-  onBudgetExhausted: report => console.warn(JSON.stringify({ event: "publisher_budget_exhausted", ...report })) });
+  onBudgetExhausted: report => console.warn(JSON.stringify({ event: "publisher_budget_exhausted", ...report })),
+  onAccessDenied: report => console.warn(JSON.stringify(report)) });
 export const safeFetch = defaultFetcher.safeFetch;
