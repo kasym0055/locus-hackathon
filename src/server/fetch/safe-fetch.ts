@@ -297,7 +297,12 @@ export function createSafeFetcher(dependencies: FetchDependencies = {}) {
 
   async function bounded<T extends FetchResult | AccessResult>(ctx: RunContext, kind: FetchKind, operation: (boundedContext: RunContext) => Promise<T>): Promise<T> {
     assertActive(ctx);
-    const remaining = Math.min(3_000, ctx.deadlineAt - Date.now());
+    // A first-party identity HTML fetch may include both an uncached robots
+    // request and the document request. Each connection, headers wait, and
+    // body read remains capped at three seconds above; this five-second window
+    // only lets those already-bounded steps complete within the 27s request.
+    const operationLimit = kind === "html" && ctx.publisherPhase === "identity" ? 5_000 : 3_000;
+    const remaining = Math.min(operationLimit, ctx.deadlineAt - Date.now());
     const local = AbortSignal.timeout(Math.max(1, remaining));
     const signal = AbortSignal.any([ctx.signal, local]);
     const reportTimeout = () => reportLocalTimeout(ctx, local, signal, remaining, { component: "publisher", kind,

@@ -262,6 +262,22 @@ describe("pinned public-address transport", () => {
     expect(client.connections.every((connection) => connection.address === "93.184.216.34" && connection.servername === "publisher.org")).toBe(true);
     expect(client.requests.every((request) => request.host === "publisher.org" && request.userAgent === "VisualUniversityProfile/0.1 (+https://visual-profile-project.org/contact)")).toBe(true);
   });
+  it("allows a bounded identity fetch to complete robots and HTML steps that jointly exceed three seconds", async () => {
+    const reports: unknown[] = [];
+    const client = await setup((request, response) => {
+      setTimeout(() => ordinary(request, response), 1_550);
+    }, { onLocalTimeout: report => { reports.push(report); } });
+    const ctx = { ...contextFixture(), publisherPhase: "identity" as const };
+    const startedAt = Date.now();
+
+    await expect(client.safeFetch("https://publisher.org/a", "html", ctx)).resolves.toMatchObject({ status: 200 });
+
+    const elapsedMs = Date.now() - startedAt;
+    expect(elapsedMs).toBeGreaterThanOrEqual(3_000);
+    expect(elapsedMs).toBeLessThan(5_000);
+    expect(reports).toEqual([]);
+    expect(client.requests.map(request => request.path)).toEqual(["/robots.txt", "/a"]);
+  });
   it("rechecks redirects and never connects to a private destination", async () => {
     const client = await setup((request, response) => {
       if (request.url === "/robots.txt") return ordinary(request, response);
